@@ -3,7 +3,8 @@ import {
   LayoutDashboard, Wallet, ListChecks, Target, Sparkles, Plus, Trash2,
   TrendingUp, AlertTriangle, CheckCircle2, Info, PiggyBank, Home,
   Plane, Hammer, ShieldCheck, ArrowRight, Pencil, X, GraduationCap,
-  BookOpen, Coffee, Lightbulb, ChevronRight, Settings, Briefcase, Landmark
+  BookOpen, Coffee, Lightbulb, ChevronRight, Settings, Briefcase, Landmark,
+  RefreshCw, HandCoins, BellRing, CalendarClock
 } from "lucide-react";
 import {
   PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis,
@@ -133,6 +134,10 @@ const DEFAULT_STATE = {
   ],
   chatHistory: [],
   monthlySnapshots: [],
+  // Money owed TO the user — IOUs, lent cash, fronted shared bills.
+  reminders: [],
+  // Recurring subscriptions with renewal/deduction dates.
+  subscriptions: [],
 };
 
 /* ============================================================
@@ -184,8 +189,10 @@ export default function App() {
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
     { id: "envelopes", label: "Envelopes", icon: Wallet },
     { id: "ledger", label: "Ledger", icon: ListChecks },
+    { id: "subs", label: "Subs", icon: RefreshCw },
+    { id: "owed", label: "Owed", icon: HandCoins },
     { id: "goals", label: "Goals", icon: Target },
-    { id: "coach", label: "AI Coach", icon: Sparkles },
+    { id: "coach", label: "Coach", icon: Sparkles },
   ];
 
   return (
@@ -218,6 +225,8 @@ export default function App() {
         {tab === "dashboard" && <Dashboard state={state} update={update} goTo={setTab} />}
         {tab === "envelopes" && <Envelopes state={state} update={update} />}
         {tab === "ledger" && <Ledger state={state} update={update} />}
+        {tab === "subs" && <Subscriptions state={state} update={update} />}
+        {tab === "owed" && <Owed state={state} update={update} />}
         {tab === "goals" && <Goals state={state} update={update} />}
         {tab === "coach" && <Coach state={state} update={update} />}
       </main>
@@ -802,6 +811,9 @@ function Dashboard({ state, update, goTo }) {
             </p>}
       </div>
 
+      {/* Upcoming: reminders + renewals */}
+      <UpcomingCard state={state} goTo={goTo} />
+
       {/* Net worth */}
       <NetWorthCard state={state} update={update} />
 
@@ -830,6 +842,74 @@ function Dashboard({ state, update, goTo }) {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   UPCOMING — reminders & subscription renewals due soon
+   ============================================================ */
+function UpcomingCard({ state, goTo }) {
+  const reminders = (state.reminders || [])
+    .filter((r) => !r.settled)
+    .map((r) => {
+      const due = r.frequency && r.frequency !== "once"
+        ? nextOccurrence(r.dueDate, r.frequency, r.endDate) : r.dueDate;
+      return { kind: "owed", label: r.who, sub: r.purpose, amount: r.amount,
+        days: daysUntil(due), date: due, tab: "owed" };
+    });
+  const renewals = (state.subscriptions || [])
+    .filter((s) => s.active !== false)
+    .map((s) => ({ kind: "sub", label: s.name, sub: "Renews / deducts", amount: s.cost,
+      days: daysUntil(s.nextRenew), date: s.nextRenew, tab: "subs" }));
+
+  // Show items within the next 7 days, or anything overdue.
+  const items = [...reminders, ...renewals]
+    .filter((i) => i.days !== null && i.days <= 7)
+    .sort((a, b) => a.days - b.days)
+    .slice(0, 5);
+
+  if (items.length === 0) return null;
+
+  return (
+    <div style={sx.card}>
+      <h4 style={{ ...sx.cardH4 }}>
+        <BellRing size={14} color={C.lavDeep} style={{ verticalAlign: -2, marginRight: 5 }} />
+        Coming up this week
+      </h4>
+      {items.map((i, idx) => {
+        const overdue = i.days < 0;
+        const isOwed = i.kind === "owed";
+        return (
+          <div key={idx} onClick={() => goTo(i.tab)} style={{
+            display: "flex", alignItems: "center", gap: 10, padding: "9px 0",
+            borderBottom: idx < items.length - 1 ? `1px solid ${C.line}` : "none", cursor: "pointer",
+          }}>
+            <div style={{ width: 28, height: 28, borderRadius: 8, flexShrink: 0,
+              background: isOwed ? C.mintBg : C.peachBg, display: "flex",
+              alignItems: "center", justifyContent: "center" }}>
+              {isOwed ? <HandCoins size={14} color={C.mintDeep} />
+                : <RefreshCw size={14} color={C.peachDeep} />}
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 700, color: C.ink }}>{i.label}</div>
+              <div style={{ fontSize: 10.5, color: C.inkFaint }}>
+                {i.sub} · {fmtDate(i.date)}
+              </div>
+            </div>
+            <div style={{ textAlign: "right" }}>
+              <div style={{ fontSize: 12.5, fontWeight: 800,
+                color: isOwed ? C.mintDeep : C.peachDeep }}>
+                {isOwed ? "+" : "-"}${i.amount.toLocaleString()}
+              </div>
+              <div style={{ fontSize: 9.5, fontWeight: 800,
+                color: overdue ? C.roseDeep : i.days <= 2 ? C.butterDeep : C.inkFaint }}>
+                {dueLabel(i.days)}
+              </div>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -977,14 +1057,15 @@ function AssetEditor({ state, update }) {
   );
 }
 
-function StatCard({ label, value, accent, bg, icon: Icon }) {  return (
+function StatCard({ label, value, accent, bg, icon: Icon, isCount }) {
+  return (
     <div style={{ ...sx.statCard, background: bg }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
         <span style={{ fontSize: 11.5, color: C.inkSoft, fontWeight: 600 }}>{label}</span>
         <Icon size={15} color={accent} />
       </div>
       <div style={{ fontSize: 22, fontWeight: 800, color: accent, marginTop: 6, letterSpacing: -0.5 }}>
-        ${Math.round(value).toLocaleString()}
+        {isCount ? Math.round(value).toLocaleString() : `$${Math.round(value).toLocaleString()}`}
       </div>
     </div>
   );
@@ -1338,6 +1419,54 @@ function fmtDate(d) {
   } catch { return d; }
 }
 
+const todayISO = () => new Date().toISOString().slice(0, 10);
+
+// Days from today until a date. Negative = overdue.
+function daysUntil(dateStr) {
+  if (!dateStr) return null;
+  const d = new Date(dateStr); d.setHours(0, 0, 0, 0);
+  const t = new Date(); t.setHours(0, 0, 0, 0);
+  return Math.round((d - t) / 86400000);
+}
+
+// Advance a date string by one recurrence cycle.
+function advanceDate(dateStr, freq) {
+  const d = new Date(dateStr);
+  if (freq === "daily") d.setDate(d.getDate() + 1);
+  else if (freq === "weekly") d.setDate(d.getDate() + 7);
+  else if (freq === "monthly") d.setMonth(d.getMonth() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
+// Roll a recurring date forward until it's today or later (or past its end date).
+function nextOccurrence(dateStr, freq, endDate) {
+  if (freq === "once" || !freq) return dateStr;
+  let d = dateStr;
+  let guard = 0;
+  while (daysUntil(d) < 0 && guard < 800) {
+    const advanced = advanceDate(d, freq);
+    if (endDate && new Date(advanced) > new Date(endDate)) return d;
+    d = advanced;
+    guard++;
+  }
+  return d;
+}
+
+function dueLabel(days) {
+  if (days === null) return "";
+  if (days < 0) return `${Math.abs(days)}d overdue`;
+  if (days === 0) return "Due today";
+  if (days === 1) return "Due tomorrow";
+  return `In ${days} days`;
+}
+
+const FREQ_OPTIONS = [
+  { key: "once", label: "One-time" },
+  { key: "daily", label: "Daily" },
+  { key: "weekly", label: "Weekly" },
+  { key: "monthly", label: "Monthly" },
+];
+
 /* ============================================================
    GOALS — MILESTONE TRACKING
    ============================================================ */
@@ -1508,6 +1637,375 @@ function monthsBetween(a, b) {
 }
 
 /* ============================================================
+   OWED — MONEY OWED TO YOU, WITH REMINDERS
+   ============================================================ */
+function Owed({ state, update }) {
+  const [adding, setAdding] = useState(false);
+  const reminders = state.reminders || [];
+
+  // Each reminder's effective due date accounts for recurrence.
+  const enriched = reminders.map((r) => {
+    const due = r.frequency && r.frequency !== "once"
+      ? nextOccurrence(r.dueDate, r.frequency, r.endDate)
+      : r.dueDate;
+    return { ...r, effectiveDue: due, days: daysUntil(due) };
+  }).sort((a, b) => (a.days ?? 9999) - (b.days ?? 9999));
+
+  const totalOwed = reminders.filter((r) => !r.settled).reduce((a, r) => a + r.amount, 0);
+  const overdue = enriched.filter((r) => !r.settled && r.days !== null && r.days < 0);
+
+  const addReminder = (r) => {
+    update((s) => ({ ...s, reminders: [{ ...r, id: "r" + Date.now(), settled: false }, ...(s.reminders || [])] }));
+    setAdding(false);
+  };
+  const settle = (id) => update((s) => ({
+    ...s, reminders: s.reminders.map((r) => r.id === id ? { ...r, settled: !r.settled } : r),
+  }));
+  const del = (id) => update((s) => ({ ...s, reminders: s.reminders.filter((r) => r.id !== id) }));
+
+  return (
+    <div>
+      <SectionTitle icon={HandCoins} title="Money owed to you"
+        subtitle="Track IOUs and get reminders so you're never the one who forgets" />
+
+      <div style={sx.statRow}>
+        <StatCard label="Total owed to you" value={totalOwed} accent={C.mintDeep} bg={C.mintBg} icon={HandCoins} />
+        <StatCard label="Overdue items" value={overdue.length} accent={C.roseDeep} bg={C.roseBg}
+          icon={BellRing} isCount />
+      </div>
+
+      {overdue.length > 0 && (
+        <div style={{ ...sx.eduStrip, background: C.roseBg }}>
+          <BellRing size={14} color={C.roseDeep} />
+          <span><strong>{overdue.length} reminder{overdue.length > 1 ? "s" : ""} overdue.</strong> A
+            friendly nudge is usually all it takes — the longer you wait, the more awkward it feels.</span>
+        </div>
+      )}
+
+      {reminders.length === 0 && !adding && (
+        <div style={{ ...sx.card, textAlign: "center", padding: "28px 16px" }}>
+          <HandCoins size={26} color={C.inkFaint} />
+          <p style={{ fontSize: 12.5, color: C.inkSoft, margin: "8px 0 0" }}>
+            Nothing tracked yet. Add a reminder whenever you lend money or front a shared bill.
+          </p>
+        </div>
+      )}
+
+      {enriched.map((r) => {
+        const overdueR = !r.settled && r.days !== null && r.days < 0;
+        const soon = !r.settled && r.days !== null && r.days >= 0 && r.days <= 3;
+        return (
+          <div key={r.id} style={{
+            ...sx.card, marginBottom: 10, opacity: r.settled ? 0.6 : 1,
+            borderLeft: `4px solid ${r.settled ? C.line : overdueR ? C.roseDeep : soon ? C.butterDeep : C.mintDeep}`,
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: C.ink,
+                  textDecoration: r.settled ? "line-through" : "none" }}>
+                  {r.who}
+                </div>
+                <div style={{ fontSize: 11.5, color: C.inkSoft, marginTop: 1 }}>{r.purpose}</div>
+              </div>
+              <div style={{ fontSize: 16, fontWeight: 800, color: r.settled ? C.inkFaint : C.mintDeep }}>
+                ${r.amount.toLocaleString()}
+              </div>
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+              {r.dueDate && (
+                <span style={{
+                  fontSize: 10.5, fontWeight: 800, padding: "3px 8px", borderRadius: 6,
+                  background: r.settled ? C.bg : overdueR ? C.roseBg : soon ? C.butterBg : C.skyBg,
+                  color: r.settled ? C.inkFaint : overdueR ? C.roseDeep : soon ? C.butterDeep : C.skyDeep,
+                }}>
+                  <CalendarClock size={10} style={{ verticalAlign: -1, marginRight: 3 }} />
+                  {r.settled ? "Settled" : `${dueLabel(r.days)} · ${fmtDate(r.effectiveDue)}`}
+                </span>
+              )}
+              {r.frequency && r.frequency !== "once" && (
+                <span style={sx.recurTag}>
+                  <RefreshCw size={9} style={{ verticalAlign: -1, marginRight: 3 }} />
+                  {r.frequency}{r.endDate ? ` until ${fmtDate(r.endDate)}` : ""}
+                </span>
+              )}
+            </div>
+
+            <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+              <button style={{ ...sx.softBtn, flex: 1,
+                background: r.settled ? C.bg : C.mintBg, color: r.settled ? C.inkSoft : C.mintDeep,
+                borderColor: r.settled ? C.line : C.mint }}
+                onClick={() => settle(r.id)}>
+                <CheckCircle2 size={13} /> {r.settled ? "Mark unpaid" : "Mark as paid back"}
+              </button>
+              <button style={{ ...sx.ghostBtn, flex: "0 0 auto", padding: "8px 12px" }}
+                onClick={() => del(r.id)}>
+                <Trash2 size={13} color={C.inkFaint} />
+              </button>
+            </div>
+          </div>
+        );
+      })}
+
+      {adding ? (
+        <ReminderForm onAdd={addReminder} onCancel={() => setAdding(false)} />
+      ) : (
+        <button style={sx.dashedBtn} onClick={() => setAdding(true)}>
+          <Plus size={15} /> Add a reminder
+        </button>
+      )}
+    </div>
+  );
+}
+
+function ReminderForm({ onAdd, onCancel }) {
+  const [who, setWho] = useState("");
+  const [purpose, setPurpose] = useState("");
+  const [amount, setAmount] = useState("");
+  const [dueDate, setDueDate] = useState(todayISO());
+  const [frequency, setFrequency] = useState("once");
+  const [endDate, setEndDate] = useState("");
+  const valid = who && amount && Number(amount) > 0;
+
+  return (
+    <div style={sx.card}>
+      <h4 style={sx.cardH4}>New reminder</h4>
+      <Field label="Who owes you?">
+        <input style={sx.input} value={who} onChange={(e) => setWho(e.target.value)}
+          placeholder="e.g. Jaden, Mum, work claim" />
+      </Field>
+      <Field label="What is it for?">
+        <input style={sx.input} value={purpose} onChange={(e) => setPurpose(e.target.value)}
+          placeholder="e.g. Concert ticket, shared dinner" />
+      </Field>
+      <Field label="Amount owed (SGD)">
+        <input style={sx.input} type="number" value={amount}
+          onChange={(e) => setAmount(e.target.value)} placeholder="e.g. 45" />
+      </Field>
+      <Field label="Remind me on">
+        <input style={sx.input} type="date" value={dueDate}
+          onChange={(e) => setDueDate(e.target.value)} />
+      </Field>
+      <Field label="Repeat">
+        <div style={{ display: "flex", gap: 5 }}>
+          {FREQ_OPTIONS.map((f) => (
+            <button key={f.key} onClick={() => setFrequency(f.key)} style={{
+              ...sx.chip, fontSize: 11,
+              background: frequency === f.key ? C.lavDeep : C.lavBg,
+              color: frequency === f.key ? "#fff" : C.lavDeep,
+            }}>{f.label}</button>
+          ))}
+        </div>
+      </Field>
+      {frequency !== "once" && (
+        <Field label="Stop repeating after (optional)">
+          <input style={sx.input} type="date" value={endDate}
+            onChange={(e) => setEndDate(e.target.value)} />
+        </Field>
+      )}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button style={sx.ghostBtn} onClick={onCancel}>Cancel</button>
+        <button style={{ ...sx.primaryBtn, opacity: valid ? 1 : 0.5 }} disabled={!valid}
+          onClick={() => onAdd({
+            who, purpose: purpose || "Money owed", amount: Number(amount),
+            dueDate, frequency, endDate: frequency !== "once" ? endDate : "",
+          })}>
+          Add reminder
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   SUBSCRIPTIONS — RECURRING SPEND TRACKER
+   ============================================================ */
+const SUB_CYCLES = [
+  { key: "monthly", label: "Monthly", perMonth: 1 },
+  { key: "yearly", label: "Yearly", perMonth: 1 / 12 },
+  { key: "weekly", label: "Weekly", perMonth: 52 / 12 },
+];
+
+function Subscriptions({ state, update }) {
+  const [adding, setAdding] = useState(false);
+  const subs = state.subscriptions || [];
+
+  const monthlyTotal = subs.filter((s) => s.active !== false).reduce((a, s) => {
+    const cyc = SUB_CYCLES.find((c) => c.key === s.cycle) || SUB_CYCLES[0];
+    return a + s.cost * cyc.perMonth;
+  }, 0);
+
+  const enriched = subs.map((s) => {
+    const next = nextOccurrence(s.nextRenew, s.cycle === "yearly" ? "monthly" : s.cycle, "");
+    return { ...s, days: daysUntil(s.nextRenew) >= 0 ? daysUntil(s.nextRenew) : daysUntil(next), nextShown: daysUntil(s.nextRenew) >= 0 ? s.nextRenew : next };
+  }).sort((a, b) => (a.days ?? 9999) - (b.days ?? 9999));
+
+  const subsEnvelope = state.envelopes.find((e) =>
+    e.name.toLowerCase().includes("subscription") || e.name.toLowerCase().includes("bills"));
+
+  const addSub = (s) => {
+    update((st) => ({ ...st, subscriptions: [{ ...s, id: "sub" + Date.now(), active: true }, ...(st.subscriptions || [])] }));
+    setAdding(false);
+  };
+  const toggle = (id) => update((st) => ({
+    ...st, subscriptions: st.subscriptions.map((s) => s.id === id ? { ...s, active: s.active === false } : s),
+  }));
+  const del = (id) => update((st) => ({ ...st, subscriptions: st.subscriptions.filter((s) => s.id !== id) }));
+
+  // Push the computed monthly total into the subscriptions envelope budget.
+  const syncToEnvelope = () => {
+    if (!subsEnvelope) return;
+    update((st) => ({
+      ...st,
+      envelopes: st.envelopes.map((e) =>
+        e.id === subsEnvelope.id ? { ...e, budget: Math.round(monthlyTotal) } : e),
+    }));
+  };
+
+  return (
+    <div>
+      <SectionTitle icon={RefreshCw} title="Subscriptions"
+        subtitle="Every recurring charge, and exactly when it hits your account" />
+
+      <div style={sx.statRow}>
+        <StatCard label="Cost per month" value={monthlyTotal} accent={C.peachDeep} bg={C.peachBg} icon={RefreshCw} />
+        <StatCard label="Cost per year" value={monthlyTotal * 12} accent={C.lavDeep} bg={C.lavBg} icon={CalendarClock} />
+      </div>
+
+      <div style={sx.eduStrip}>
+        <Lightbulb size={14} color={C.butterDeep} />
+        <span><strong>Subscription creep is real:</strong> small monthly charges feel harmless but
+          ${Math.round(monthlyTotal)}/month is ${Math.round(monthlyTotal * 12)}/year. Review anything
+          you haven't used in the last 30 days.</span>
+      </div>
+
+      {subsEnvelope && subs.length > 0 && (
+        <button style={{ ...sx.softBtn, marginBottom: 12 }} onClick={syncToEnvelope}>
+          <RefreshCw size={13} /> Set "{subsEnvelope.name}" envelope budget to ${Math.round(monthlyTotal)}
+        </button>
+      )}
+
+      {subs.length === 0 && !adding && (
+        <div style={{ ...sx.card, textAlign: "center", padding: "28px 16px" }}>
+          <RefreshCw size={26} color={C.inkFaint} />
+          <p style={{ fontSize: 12.5, color: C.inkSoft, margin: "8px 0 0" }}>
+            No subscriptions tracked. Add Netflix, Spotify, phone plan, gym — anything that
+            auto-charges you.
+          </p>
+        </div>
+      )}
+
+      {enriched.map((s) => {
+        const inactive = s.active === false;
+        const soon = !inactive && s.days !== null && s.days >= 0 && s.days <= 5;
+        const cyc = SUB_CYCLES.find((c) => c.key === s.cycle) || SUB_CYCLES[0];
+        return (
+          <div key={s.id} style={{
+            ...sx.card, marginBottom: 10, opacity: inactive ? 0.55 : 1,
+            borderLeft: `4px solid ${inactive ? C.line : soon ? C.butterDeep : C.peach}`,
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: C.ink }}>{s.name}</div>
+                <div style={{ fontSize: 11.5, color: C.inkSoft }}>
+                  ${s.cost}/{cyc.label.toLowerCase().replace("ly", "")}
+                  {s.cycle !== "monthly" && ` · ~$${(s.cost * cyc.perMonth).toFixed(2)}/mo`}
+                </div>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ fontSize: 15, fontWeight: 800, color: inactive ? C.inkFaint : C.peachDeep }}>
+                  ${s.cost}
+                </div>
+              </div>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+              {s.nextRenew && (
+                <span style={{
+                  fontSize: 10.5, fontWeight: 800, padding: "3px 8px", borderRadius: 6,
+                  background: inactive ? C.bg : soon ? C.butterBg : C.skyBg,
+                  color: inactive ? C.inkFaint : soon ? C.butterDeep : C.skyDeep,
+                }}>
+                  <CalendarClock size={10} style={{ verticalAlign: -1, marginRight: 3 }} />
+                  {inactive ? "Paused" : `Renews ${dueLabel(s.days).toLowerCase()} · ${fmtDate(s.nextShown)}`}
+                </span>
+              )}
+              <span style={sx.recurTag}>
+                <RefreshCw size={9} style={{ verticalAlign: -1, marginRight: 3 }} />
+                {cyc.label}
+              </span>
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+              <button style={{ ...sx.softBtn, flex: 1,
+                background: inactive ? C.mintBg : C.bg, color: inactive ? C.mintDeep : C.inkSoft,
+                borderColor: inactive ? C.mint : C.line }}
+                onClick={() => toggle(s.id)}>
+                {inactive ? "Reactivate" : "Pause / cancelled"}
+              </button>
+              <button style={{ ...sx.ghostBtn, flex: "0 0 auto", padding: "8px 12px" }}
+                onClick={() => del(s.id)}>
+                <Trash2 size={13} color={C.inkFaint} />
+              </button>
+            </div>
+          </div>
+        );
+      })}
+
+      {adding ? (
+        <SubscriptionForm onAdd={addSub} onCancel={() => setAdding(false)} />
+      ) : (
+        <button style={sx.dashedBtn} onClick={() => setAdding(true)}>
+          <Plus size={15} /> Add a subscription
+        </button>
+      )}
+    </div>
+  );
+}
+
+function SubscriptionForm({ onAdd, onCancel }) {
+  const [name, setName] = useState("");
+  const [cost, setCost] = useState("");
+  const [cycle, setCycle] = useState("monthly");
+  const [nextRenew, setNextRenew] = useState(todayISO());
+  const valid = name && cost && Number(cost) > 0;
+
+  return (
+    <div style={sx.card}>
+      <h4 style={sx.cardH4}>New subscription</h4>
+      <Field label="Service name">
+        <input style={sx.input} value={name} onChange={(e) => setName(e.target.value)}
+          placeholder="e.g. Netflix, Spotify, phone plan" />
+      </Field>
+      <Field label="Cost (SGD)">
+        <input style={sx.input} type="number" value={cost}
+          onChange={(e) => setCost(e.target.value)} placeholder="e.g. 16.98" />
+      </Field>
+      <Field label="Billing cycle">
+        <div style={{ display: "flex", gap: 5 }}>
+          {SUB_CYCLES.map((c) => (
+            <button key={c.key} onClick={() => setCycle(c.key)} style={{
+              ...sx.chip, fontSize: 11,
+              background: cycle === c.key ? C.lavDeep : C.lavBg,
+              color: cycle === c.key ? "#fff" : C.lavDeep,
+            }}>{c.label}</button>
+          ))}
+        </div>
+      </Field>
+      <Field label="Next renewal / deduction date">
+        <input style={sx.input} type="date" value={nextRenew}
+          onChange={(e) => setNextRenew(e.target.value)} />
+      </Field>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button style={sx.ghostBtn} onClick={onCancel}>Cancel</button>
+        <button style={{ ...sx.primaryBtn, opacity: valid ? 1 : 0.5 }} disabled={!valid}
+          onClick={() => onAdd({ name, cost: Number(cost), cycle, nextRenew })}>
+          Add subscription
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
    AI COACH — CONVERSATIONAL UI
    ============================================================ */
 const STARTER_QUESTIONS = [
@@ -1515,6 +2013,7 @@ const STARTER_QUESTIONS = [
   "Where should I cut back?",
   "How do I start investing in Singapore?",
   "How much should I save for a BTO?",
+  "Are my subscriptions costing too much?",
   "Explain CPF like I'm new to this.",
 ];
 
@@ -1530,11 +2029,20 @@ function buildContextSummary(state) {
     : "none recorded yet";
   const netWorth = (state.assets || []).reduce((a, x) => a + x.amount, 0);
   const salChanges = (state.salaryHistory || []).length;
+  const subs = state.subscriptions || [];
+  const subMonthly = subs.filter((s) => s.active !== false).reduce((a, s) => {
+    const per = s.cycle === "yearly" ? 1 / 12 : s.cycle === "weekly" ? 52 / 12 : 1;
+    return a + s.cost * per;
+  }, 0);
+  const owed = (state.reminders || []).filter((r) => !r.settled);
+  const owedTotal = owed.reduce((a, r) => a + r.amount, 0);
   return `User profile: name ${state.profile.name}, gross salary $${state.profile.grossSalary}/mo, ` +
     `estimated take-home $${Math.round(m.income)}/mo (after CPF). ` +
     `They are a fresh graduate in Singapore starting their first full-time job, with low financial literacy. ` +
     `Assets: ${assets}. Total net worth $${Math.round(netWorth)}. ` +
     `Salary has been updated ${salChanges} time(s). ` +
+    `Subscriptions: ${subs.length} tracked, ~$${Math.round(subMonthly)}/mo total. ` +
+    `Money owed to them: ${owed.length} item(s) totalling $${Math.round(owedTotal)}. ` +
     `Envelopes: ${env}. Total budgeted $${Math.round(m.totalBudget)}, total spent $${Math.round(m.totalSpent)}. ` +
     `Goals: ${goals}. Current flags: ${flags}.`;
 }
@@ -1570,6 +2078,21 @@ function offlineReply(question, state) {
     const liquid = assets.filter((x) => assetType(x.type).liquid).reduce((a, x) => a + x.amount, 0);
     if (total === 0) return `You haven't recorded any assets yet. On the Dashboard, tap "Update" on the Net worth card to enter what you have in your savings account, fixed deposits, investments, and CPF. It's stored only on your device.`;
     return `Your recorded net worth is $${Math.round(total).toLocaleString()}. Of that, $${Math.round(liquid).toLocaleString()} is liquid — money you could actually reach in an emergency (savings account, cash). The rest sits in less-accessible places like fixed deposits, investments, or CPF.\n\nWhy the split matters: only liquid money should back your emergency fund. CPF and locked deposits are real wealth but can't be tapped for a surprise bill. Keep updating these balances as they change so your picture stays accurate.`;
+  }
+  if (q.includes("subscription") || q.includes("subscriptions")) {
+    const subs = state.subscriptions || [];
+    if (subs.length === 0) return `You haven't tracked any subscriptions yet. Add them in the Subs tab — Netflix, Spotify, phone plan, gym, anything that auto-charges. The tool will total the monthly and yearly cost and remind you before each renewal date.`;
+    const monthly = subs.filter((s) => s.active !== false).reduce((a, s) => {
+      const per = s.cycle === "yearly" ? 1 / 12 : s.cycle === "weekly" ? 52 / 12 : 1;
+      return a + s.cost * per;
+    }, 0);
+    return `You're tracking ${subs.length} subscription(s), costing about $${Math.round(monthly)}/month — that's $${Math.round(monthly * 12)} a year. The trap with subscriptions is they're individually small and easy to forget. Two quick wins: cancel anything unused in the last 30 days, and switch annual billing on for services you'll definitely keep (usually cheaper). The Subs tab shows each renewal date so nothing surprises you.`;
+  }
+  if (q.includes("owe") || q.includes("owed") || q.includes("lent") || q.includes("borrow")) {
+    const owed = (state.reminders || []).filter((r) => !r.settled);
+    const total = owed.reduce((a, r) => a + r.amount, 0);
+    if (owed.length === 0) return `Nothing is currently tracked as owed to you. When you lend money or front a shared bill, add it in the Owed tab — you can set a reminder date and even make it recurring. It saves the awkwardness of forgetting who owes what.`;
+    return `You have $${Math.round(total)} owed to you across ${owed.length} item(s). That's real money — don't let it quietly become a gift. The Owed tab flags overdue items; a short, friendly message usually settles things. Money owed to you isn't part of your spendable budget until it's actually back in your account.`;
   }
   if (q.includes("debt") || q.includes("loan") || q.includes("credit card")) {
     return `Debt strategy in order of priority:\n\n1. High-interest debt first — credit card debt in Singapore often runs ~25%/year. Clear this before investing or even before topping up savings beyond a starter buffer.\n2. Pay your credit card in full every month. Treat it like a debit card, not extra money.\n3. Lower-interest debt (student loans, etc.) can be paid down steadily while you also save.\n\nThe logic: paying off 25% debt is a guaranteed 25% return — no investment reliably beats that.`;
@@ -1849,6 +2372,10 @@ const sx = {
   liquidTag: {
     fontSize: 9.5, fontWeight: 800, color: C.skyDeep, background: C.skyBg,
     padding: "2px 6px", borderRadius: 5, marginLeft: 6,
+  },
+  recurTag: {
+    fontSize: 10, fontWeight: 800, color: C.lavDeep, background: C.lavBg,
+    padding: "3px 8px", borderRadius: 6, textTransform: "capitalize",
   },
   input: {
     width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${C.line}`,

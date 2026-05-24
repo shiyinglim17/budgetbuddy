@@ -19,6 +19,8 @@ The tool was first built as a Claude artifact. Artifacts are great but live insi
 - **Net worth tracker** — record current holdings across savings account, fixed deposit, investments, CPF, cash, and other; editable anytime from the Dashboard. Liquid vs. longer-term assets are distinguished so the emergency fund is sized correctly.
 - **Salary updates with history** — change your salary anytime in Settings (e.g. when you switch jobs or get a raise); every change is logged with a date and reason so you keep an earning history.
 - **Envelopes** — guided spending with a 50/30/20 starter split you can adjust.
+- **Subscriptions** — a dedicated tracker for every recurring charge: cost, billing cycle, and next renewal/deduction date. Totals your monthly and yearly spend and can sync that figure into your subscriptions envelope.
+- **Owed (reminders)** — track money owed to you: who owes it, what for, and how much. Each reminder can be one-time or recurring (daily/weekly/monthly) with an optional end date. Overdue items are flagged.
 - **Ledger** — granular, spreadsheet-style expense tracking; each entry updates its envelope.
 - **Goals** — milestone tracking for Emergency Fund, BTO, Renovation, Travel, and investing.
 - **AI Coach** — a conversational money coach with two modes (see below).
