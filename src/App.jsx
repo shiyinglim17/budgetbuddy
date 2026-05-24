@@ -1,0 +1,1681 @@
+import React, { useState, useEffect, useMemo, useCallback } from "react";
+import {
+  LayoutDashboard, Wallet, ListChecks, Target, Sparkles, Plus, Trash2,
+  TrendingUp, AlertTriangle, CheckCircle2, Info, PiggyBank, Home,
+  Plane, Hammer, ShieldCheck, ArrowRight, Pencil, X, GraduationCap,
+  BookOpen, Coffee, Lightbulb, ChevronRight, Settings
+} from "lucide-react";
+import {
+  PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis,
+  Tooltip, CartesianGrid, Legend, LineChart, Line, AreaChart, Area
+} from "recharts";
+
+/* ============================================================
+   PASTEL DESIGN TOKENS
+   ============================================================ */
+const C = {
+  bg: "#FBF8F4",
+  card: "#FFFFFF",
+  ink: "#3A3A4A",
+  inkSoft: "#7B7B8E",
+  inkFaint: "#A8A8B8",
+  line: "#EFE9E1",
+  // pastels
+  lav: "#C9C2F0", lavDeep: "#7F77C4", lavBg: "#F0EEFB",
+  mint: "#B6E3D4", mintDeep: "#4FA88A", mintBg: "#E7F5F0",
+  peach: "#F6C9B6", peachDeep: "#D6845E", peachBg: "#FBEBE3",
+  sky: "#B7D6F0", skyDeep: "#5B8FC4", skyBg: "#E8F1FA",
+  rose: "#F2C2D2", roseDeep: "#C97B98", roseBg: "#FBEAF0",
+  butter: "#F4DCA0", butterDeep: "#C99F3F", butterBg: "#FBF2D9",
+  sage: "#CFE0B4", sageDeep: "#84A155", sageBg: "#F0F4E6",
+};
+
+const CATEGORY_PALETTE = [
+  { key: "lav", dot: C.lav, deep: C.lavDeep, bg: C.lavBg },
+  { key: "mint", dot: C.mint, deep: C.mintDeep, bg: C.mintBg },
+  { key: "peach", dot: C.peach, deep: C.peachDeep, bg: C.peachBg },
+  { key: "sky", dot: C.sky, deep: C.skyDeep, bg: C.skyBg },
+  { key: "rose", dot: C.rose, deep: C.roseDeep, bg: C.roseBg },
+  { key: "butter", dot: C.butter, deep: C.butterDeep, bg: C.butterBg },
+  { key: "sage", dot: C.sage, deep: C.sageDeep, bg: C.sageBg },
+];
+
+/* ============================================================
+   PERSISTENT STORAGE LAYER (window.storage)
+   ============================================================ */
+const STORE_KEY = "budgetbuddy:state:v1";
+
+// Standalone build: persists to the browser's localStorage.
+// Data stays on this device, survives refreshes, costs nothing, needs no account.
+async function loadState() {
+  try {
+    const raw = localStorage.getItem(STORE_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch (e) {
+    console.error("Load failed:", e);
+  }
+  return null;
+}
+
+async function saveState(state) {
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify(state));
+  } catch (e) {
+    console.error("Save failed:", e);
+  }
+}
+
+/* ============================================================
+   SINGAPORE FINANCE LOGIC
+   ============================================================ */
+// CPF allocation for employees aged <=55 (2024/25 rates)
+// Employee contributes 20% of wage; employer 17%. Total 37%.
+// Of total: ~62.17% to OA, ~16.21% to SA, ~21.62% to MA (for age <=35 band, simplified)
+function cpfBreakdown(grossMonthly) {
+  const capped = Math.min(grossMonthly, 7400); // 2025 OW ceiling
+  const employee = capped * 0.20;
+  const employer = capped * 0.17;
+  const total = employee + employer;
+  return {
+    takeHome: grossMonthly - employee,
+    employeeCpf: employee,
+    employerCpf: employer,
+    totalCpf: total,
+    oa: total * 0.6217,
+    sa: total * 0.1621,
+    ma: total * 0.2162,
+  };
+}
+
+const DEFAULT_STATE = {
+  onboarded: false,
+  // "offline" = free, self-contained knowledge base (works after Pro ends, zero token cost)
+  // "ai" = calls Anthropic API for richer answers (needs Pro / API access)
+  coachMode: "offline",
+  profile: {
+    name: "",
+    grossSalary: 0,
+    monthlyIncomeOther: 0,
+    currentSavings: 0,
+    startWorkMonth: "",
+  },
+  // Envelope budget categories (50/30/20-inspired but editable)
+  envelopes: [
+    { id: "e1", name: "Rent / Housing", budget: 0, spent: 0, pal: 0, type: "need" },
+    { id: "e2", name: "Food & Groceries", budget: 0, spent: 0, pal: 1, type: "need" },
+    { id: "e3", name: "Transport", budget: 0, spent: 0, pal: 2, type: "need" },
+    { id: "e4", name: "Bills & Subscriptions", budget: 0, spent: 0, pal: 3, type: "need" },
+    { id: "e5", name: "Dining & Fun", budget: 0, spent: 0, pal: 4, type: "want" },
+    { id: "e6", name: "Shopping", budget: 0, spent: 0, pal: 5, type: "want" },
+    { id: "e7", name: "Savings & Invest", budget: 0, spent: 0, pal: 6, type: "save" },
+  ],
+  transactions: [],
+  goals: [
+    { id: "g1", name: "Emergency Fund", target: 0, saved: 0, icon: "shield", deadline: "", note: "3-6 months of expenses. Build this FIRST." },
+  ],
+  chatHistory: [],
+  monthlySnapshots: [],
+};
+
+/* ============================================================
+   ROOT
+   ============================================================ */
+export default function App() {
+  const [state, setState] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [tab, setTab] = useState("dashboard");
+
+  useEffect(() => {
+    (async () => {
+      const saved = await loadState();
+      setState(saved || DEFAULT_STATE);
+      setLoading(false);
+    })();
+  }, []);
+
+  // debounced persistence
+  useEffect(() => {
+    if (!state || loading) return;
+    const t = setTimeout(() => saveState(state), 400);
+    return () => clearTimeout(t);
+  }, [state, loading]);
+
+  const update = useCallback((fn) => {
+    setState((prev) => {
+      const next = typeof fn === "function" ? fn(prev) : fn;
+      return next;
+    });
+  }, []);
+
+  if (loading || !state) {
+    return (
+      <div style={{ ...sx.app, display: "flex", alignItems: "center", justifyContent: "center", minHeight: 400 }}>
+        <div style={{ textAlign: "center", color: C.inkSoft }}>
+          <PiggyBank size={40} color={C.lavDeep} />
+          <p style={{ marginTop: 12, fontSize: 14 }}>Loading your finances…</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!state.onboarded) {
+    return <Onboarding state={state} update={update} />;
+  }
+
+  const TABS = [
+    { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+    { id: "envelopes", label: "Envelopes", icon: Wallet },
+    { id: "ledger", label: "Ledger", icon: ListChecks },
+    { id: "goals", label: "Goals", icon: Target },
+    { id: "coach", label: "AI Coach", icon: Sparkles },
+  ];
+
+  return (
+    <div style={sx.app}>
+      <style>{globalCss}</style>
+      <Header state={state} update={update} />
+      <nav style={sx.nav}>
+        {TABS.map((t) => {
+          const Icon = t.icon;
+          const active = tab === t.id;
+          return (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              style={{
+                ...sx.navBtn,
+                background: active ? C.lavDeep : "transparent",
+                color: active ? "#fff" : C.inkSoft,
+                boxShadow: active ? "0 4px 12px rgba(127,119,196,0.32)" : "none",
+              }}
+            >
+              <Icon size={16} />
+              <span className="navLabel">{t.label}</span>
+            </button>
+          );
+        })}
+      </nav>
+
+      <main style={sx.main}>
+        {tab === "dashboard" && <Dashboard state={state} update={update} goTo={setTab} />}
+        {tab === "envelopes" && <Envelopes state={state} update={update} />}
+        {tab === "ledger" && <Ledger state={state} update={update} />}
+        {tab === "goals" && <Goals state={state} update={update} />}
+        {tab === "coach" && <Coach state={state} update={update} />}
+      </main>
+      <footer style={sx.footer}>
+        Educational tool for personal planning — not licensed financial advice. Verify CPF & investment details with official sources.
+      </footer>
+    </div>
+  );
+}
+
+/* ============================================================
+   ONBOARDING
+   ============================================================ */
+function Onboarding({ state, update }) {
+  const [step, setStep] = useState(0);
+  const [form, setForm] = useState({
+    name: "", grossSalary: "", currentSavings: "", startWorkMonth: "",
+  });
+
+  const finish = () => {
+    const gross = Number(form.grossSalary) || 0;
+    const cpf = cpfBreakdown(gross);
+    const takeHome = cpf.takeHome;
+    // 50/30/20 starter allocation on take-home pay
+    const needs = takeHome * 0.5;
+    const wants = takeHome * 0.3;
+    const save = takeHome * 0.2;
+    const envelopes = [
+      { id: "e1", name: "Rent / Housing", budget: Math.round(needs * 0.45), spent: 0, pal: 0, type: "need" },
+      { id: "e2", name: "Food & Groceries", budget: Math.round(needs * 0.3), spent: 0, pal: 1, type: "need" },
+      { id: "e3", name: "Transport", budget: Math.round(needs * 0.13), spent: 0, pal: 2, type: "need" },
+      { id: "e4", name: "Bills & Subscriptions", budget: Math.round(needs * 0.12), spent: 0, pal: 3, type: "need" },
+      { id: "e5", name: "Dining & Fun", budget: Math.round(wants * 0.55), spent: 0, pal: 4, type: "want" },
+      { id: "e6", name: "Shopping", budget: Math.round(wants * 0.45), spent: 0, pal: 5, type: "want" },
+      { id: "e7", name: "Savings & Invest", budget: Math.round(save), spent: 0, pal: 6, type: "save" },
+    ];
+    update({
+      ...state,
+      onboarded: true,
+      profile: {
+        name: form.name || "there",
+        grossSalary: gross,
+        monthlyIncomeOther: 0,
+        currentSavings: Number(form.currentSavings) || 0,
+        startWorkMonth: form.startWorkMonth,
+      },
+      envelopes,
+      goals: [
+        {
+          id: "g1", name: "Emergency Fund", icon: "shield",
+          target: Math.round(needs * 6), saved: Number(form.currentSavings) || 0,
+          deadline: "", note: "3-6 months of expenses. Build this FIRST, before investing.",
+        },
+      ],
+    });
+  };
+
+  const cpf = form.grossSalary ? cpfBreakdown(Number(form.grossSalary)) : null;
+
+  return (
+    <div style={{ ...sx.app, minHeight: 520 }}>
+      <style>{globalCss}</style>
+      <div style={sx.onbWrap}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+          <div style={sx.logoMark}><PiggyBank size={22} color="#fff" /></div>
+          <div>
+            <h1 style={{ margin: 0, fontSize: 20, color: C.ink }}>BudgetBuddy SG</h1>
+            <p style={{ margin: 0, fontSize: 12.5, color: C.inkSoft }}>Your personal money companion</p>
+          </div>
+        </div>
+
+        <div style={sx.onbDots}>
+          {[0, 1, 2].map((i) => (
+            <div key={i} style={{ ...sx.onbDot, background: i <= step ? C.lavDeep : C.line }} />
+          ))}
+        </div>
+
+        {step === 0 && (
+          <div style={sx.onbCard}>
+            <span style={sx.onbBadge}><GraduationCap size={13} /> Welcome</span>
+            <h2 style={sx.onbH2}>Let's set you up for your first job</h2>
+            <p style={sx.onbP}>
+              This tool grows with you — from tracking daily kopi spends to planning a BTO down payment.
+              It's built for Singapore, so it understands CPF, and it's designed for someone just starting out.
+              Nothing here leaves your device.
+            </p>
+            <Field label="What should I call you?">
+              <input style={sx.input} value={form.name}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+                placeholder="Your name" />
+            </Field>
+            <button style={sx.primaryBtn} onClick={() => setStep(1)}>
+              Get started <ArrowRight size={16} />
+            </button>
+          </div>
+        )}
+
+        {step === 1 && (
+          <div style={sx.onbCard}>
+            <span style={sx.onbBadge}><Wallet size={13} /> Your income</span>
+            <h2 style={sx.onbH2}>Expected monthly salary</h2>
+            <p style={sx.onbP}>
+              Enter your <strong>gross</strong> monthly salary (before CPF). Not sure yet?
+              The 2024 median fresh-grad starting salary was around $4,000–$4,500 — use an estimate, you can change it anytime.
+            </p>
+            <Field label="Gross monthly salary (SGD)">
+              <input style={sx.input} type="number" value={form.grossSalary}
+                onChange={(e) => setForm({ ...form, grossSalary: e.target.value })}
+                placeholder="e.g. 4200" />
+            </Field>
+            <Field label="When do you start work?">
+              <input style={sx.input} type="month" value={form.startWorkMonth}
+                onChange={(e) => setForm({ ...form, startWorkMonth: e.target.value })} />
+            </Field>
+
+            {cpf && cpf.takeHome > 0 && (
+              <div style={sx.cpfBox}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+                  <Info size={14} color={C.skyDeep} />
+                  <strong style={{ fontSize: 13, color: C.ink }}>How CPF affects your paycheck</strong>
+                </div>
+                <p style={{ fontSize: 12.5, color: C.inkSoft, margin: "0 0 10px", lineHeight: 1.6 }}>
+                  As an employee, 20% of your wage goes to CPF. Your employer adds 17% on top. That money isn't gone —
+                  it's split into accounts you'll use for housing, healthcare, and retirement.
+                </p>
+                <div style={sx.cpfGrid}>
+                  <CpfStat label="Cash take-home" val={cpf.takeHome} accent={C.mintDeep} big />
+                  <CpfStat label="To CPF (you)" val={cpf.employeeCpf} accent={C.inkSoft} />
+                  <CpfStat label="OA — housing" val={cpf.oa} accent={C.skyDeep} />
+                  <CpfStat label="SA — retirement" val={cpf.sa} accent={C.lavDeep} />
+                  <CpfStat label="MA — healthcare" val={cpf.ma} accent={C.peachDeep} />
+                </div>
+                <p style={{ fontSize: 11.5, color: C.inkFaint, margin: "10px 0 0", lineHeight: 1.5 }}>
+                  Your <strong>Ordinary Account (OA)</strong> is what funds a future BTO flat — so CPF is
+                  quietly helping you save for that already.
+                </p>
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: 10 }}>
+              <button style={sx.ghostBtn} onClick={() => setStep(0)}>Back</button>
+              <button style={{ ...sx.primaryBtn, opacity: form.grossSalary ? 1 : 0.5 }}
+                disabled={!form.grossSalary} onClick={() => setStep(2)}>
+                Continue <ArrowRight size={16} />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {step === 2 && (
+          <div style={sx.onbCard}>
+            <span style={sx.onbBadge}><PiggyBank size={13} /> Your starting point</span>
+            <h2 style={sx.onbH2}>What have you saved so far?</h2>
+            <p style={sx.onbP}>
+              Include cash savings and any bank balance you'd use for emergencies. Even $0 is a perfectly
+              fine starting point — everyone begins somewhere.
+            </p>
+            <Field label="Current cash savings (SGD)">
+              <input style={sx.input} type="number" value={form.currentSavings}
+                onChange={(e) => setForm({ ...form, currentSavings: e.target.value })}
+                placeholder="e.g. 3000" />
+            </Field>
+            <div style={sx.tipBox}>
+              <Lightbulb size={15} color={C.butterDeep} />
+              <p style={{ margin: 0, fontSize: 12.5, color: C.ink, lineHeight: 1.6 }}>
+                I'll create your first goal automatically: an <strong>emergency fund</strong> worth
+                ~6 months of expenses. This is the foundation — it goes before any investing.
+              </p>
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button style={sx.ghostBtn} onClick={() => setStep(1)}>Back</button>
+              <button style={sx.primaryBtn} onClick={finish}>
+                Open my dashboard <CheckCircle2 size={16} />
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CpfStat({ label, val, accent, big }) {
+  return (
+    <div style={{ background: "#fff", borderRadius: 10, padding: "8px 10px", border: `1px solid ${C.line}` }}>
+      <div style={{ fontSize: 10.5, color: C.inkFaint, marginBottom: 2 }}>{label}</div>
+      <div style={{ fontSize: big ? 16 : 13.5, fontWeight: 700, color: accent }}>
+        ${Math.round(val).toLocaleString()}
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, children }) {
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <label style={sx.label}>{label}</label>
+      {children}
+    </div>
+  );
+}
+
+/* ============================================================
+   HEADER
+   ============================================================ */
+function Header({ state, update }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <header style={sx.header}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={sx.logoMark}><PiggyBank size={20} color="#fff" /></div>
+        <div>
+          <h1 style={{ margin: 0, fontSize: 16.5, color: C.ink, letterSpacing: -0.2 }}>BudgetBuddy SG</h1>
+          <p style={{ margin: 0, fontSize: 11.5, color: C.inkSoft }}>
+            Hi {state.profile.name} — let's keep it on track
+          </p>
+        </div>
+      </div>
+      <button style={sx.iconBtn} onClick={() => setOpen(!open)} aria-label="Settings">
+        <Settings size={17} color={C.inkSoft} />
+      </button>
+      {open && <SettingsPanel state={state} update={update} close={() => setOpen(false)} />}
+    </header>
+  );
+}
+
+function SettingsPanel({ state, update, close }) {
+  const [gross, setGross] = useState(state.profile.grossSalary);
+  return (
+    <div style={sx.modalOverlay} onClick={close}>
+      <div style={sx.modal} onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <h3 style={{ margin: 0, fontSize: 16, color: C.ink }}>Settings</h3>
+          <button style={sx.iconBtn} onClick={close}><X size={16} color={C.inkSoft} /></button>
+        </div>
+        <Field label="Gross monthly salary (SGD)">
+          <input style={sx.input} type="number" value={gross}
+            onChange={(e) => setGross(e.target.value)} />
+        </Field>
+        <button style={sx.primaryBtn} onClick={() => {
+          update((s) => ({ ...s, profile: { ...s.profile, grossSalary: Number(gross) || 0 } }));
+          close();
+        }}>Save changes</button>
+        <button style={{ ...sx.ghostBtn, marginTop: 10, width: "100%", color: C.peachDeep }}
+          onClick={() => {
+            if (confirm("Reset everything? This clears all your data permanently.")) {
+              update({ ...DEFAULT_STATE });
+            }
+          }}>
+          Reset all data
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   INSIGHT ENGINE — shared by Dashboard & Coach
+   Generates personalised flags & suggestions
+   ============================================================ */
+function buildInsights(state) {
+  const cpf = cpfBreakdown(state.profile.grossSalary);
+  const income = cpf.takeHome + (state.profile.monthlyIncomeOther || 0);
+  const env = state.envelopes;
+  const totalBudget = env.reduce((a, e) => a + e.budget, 0);
+  const totalSpent = env.reduce((a, e) => a + e.spent, 0);
+  const needs = env.filter((e) => e.type === "need");
+  const wants = env.filter((e) => e.type === "want");
+  const saves = env.filter((e) => e.type === "save");
+  const needSpent = needs.reduce((a, e) => a + e.spent, 0);
+  const wantSpent = wants.reduce((a, e) => a + e.spent, 0);
+  const saveBudget = saves.reduce((a, e) => a + e.budget, 0);
+  const emergency = state.goals.find((g) => g.icon === "shield");
+  const insights = [];
+
+  // 1. Overspent envelopes
+  env.forEach((e) => {
+    if (e.budget > 0 && e.spent > e.budget) {
+      insights.push({
+        sev: "alert",
+        title: `${e.name} is over budget`,
+        body: `You've spent $${Math.round(e.spent)} against a $${Math.round(e.budget)} envelope — that's $${Math.round(e.spent - e.budget)} over. Either trim spending here for the rest of the month, or move budget from an under-used envelope.`,
+      });
+    } else if (e.budget > 0 && e.spent > e.budget * 0.85) {
+      insights.push({
+        sev: "warn",
+        title: `${e.name} is nearly used up`,
+        body: `${Math.round((e.spent / e.budget) * 100)}% of this envelope is gone. Slow down here to avoid dipping into savings.`,
+      });
+    }
+  });
+
+  // 2. Income vs budget
+  if (income > 0 && totalBudget > income) {
+    insights.push({
+      sev: "alert",
+      title: "Your budget exceeds your take-home pay",
+      body: `Your envelopes total $${Math.round(totalBudget)} but you take home $${Math.round(income)}. A budget should always be less than or equal to income — reduce a 'want' envelope to balance it.`,
+    });
+  }
+
+  // 3. Wants ratio
+  if (income > 0 && wantSpent > income * 0.35) {
+    insights.push({
+      sev: "warn",
+      title: "Discretionary spending is running high",
+      body: `Dining, shopping and fun add up to $${Math.round(wantSpent)} — over 35% of your take-home pay. A common guideline keeps 'wants' near 30%. Trimming this is the fastest way to free up money for goals.`,
+    });
+  }
+
+  // 4. Emergency fund priority
+  if (emergency && emergency.target > 0) {
+    const pct = emergency.saved / emergency.target;
+    if (pct < 1) {
+      insights.push({
+        sev: pct < 0.3 ? "warn" : "info",
+        title: `Emergency fund is ${Math.round(pct * 100)}% funded`,
+        body: pct < 0.3
+          ? `This is your safety net before any investing. Aim to fill it to $${Math.round(emergency.target)} first — it covers job loss or surprise bills without debt.`
+          : `Good progress. Once this hits 100%, you can confidently start investing the surplus.`,
+      });
+    } else {
+      insights.push({
+        sev: "good",
+        title: "Emergency fund is fully built",
+        body: `You have a complete safety net. You're now in a strong position to start investing regularly — consider a low-cost diversified fund.`,
+      });
+    }
+  }
+
+  // 5. Savings rate
+  if (income > 0) {
+    const rate = saveBudget / income;
+    if (rate < 0.1) {
+      insights.push({
+        sev: "warn",
+        title: "Savings rate is below 10%",
+        body: `You're budgeting $${Math.round(saveBudget)} to savings — about ${Math.round(rate * 100)}% of income. As a fresh grad with low fixed costs, aiming for 20%+ now builds a huge head start.`,
+      });
+    } else if (rate >= 0.2) {
+      insights.push({
+        sev: "good",
+        title: `Strong savings rate — ${Math.round(rate * 100)}%`,
+        body: `You're saving a healthy share of your income. Future-you will thank you. Make sure this money is actually working (high-yield account or invested), not idle.`,
+      });
+    }
+  }
+
+  // 6. Subscriptions creep
+  const subs = env.find((e) => e.name.toLowerCase().includes("subscription") || e.name.toLowerCase().includes("bills"));
+  if (subs && subs.spent > income * 0.12 && income > 0) {
+    insights.push({
+      sev: "info",
+      title: "Worth auditing your subscriptions",
+      body: `Bills & subscriptions are $${Math.round(subs.spent)}. Recurring charges are easy to forget — cancel anything you haven't used in 30 days.`,
+    });
+  }
+
+  return { cpf, income, totalBudget, totalSpent, needSpent, wantSpent, saveBudget, insights };
+}
+
+const monthName = () => new Date().toLocaleString("en-SG", { month: "long", year: "numeric" });
+
+/* ============================================================
+   DASHBOARD — MACRO VIEW
+   ============================================================ */
+function Dashboard({ state, update, goTo }) {
+  const m = useMemo(() => buildInsights(state), [state]);
+  const remaining = m.income - m.totalSpent;
+  const spentPct = m.income > 0 ? Math.min(100, (m.totalSpent / m.income) * 100) : 0;
+
+  const pieData = state.envelopes
+    .filter((e) => e.spent > 0)
+    .map((e) => ({ name: e.name, value: e.spent, fill: CATEGORY_PALETTE[e.pal].dot }));
+
+  const barData = state.envelopes.map((e) => ({
+    name: e.name.split(" ")[0],
+    Budget: e.budget,
+    Spent: e.spent,
+    fill: CATEGORY_PALETTE[e.pal].deep,
+  }));
+
+  const topFlags = m.insights.filter((i) => i.sev === "alert" || i.sev === "warn").slice(0, 3);
+
+  return (
+    <div>
+      <SectionTitle icon={LayoutDashboard} title={`${monthName()} overview`}
+        subtitle="Your money at a glance" />
+
+      {/* Hero stats */}
+      <div style={sx.statRow}>
+        <StatCard label="Take-home income" value={m.income} accent={C.mintDeep} bg={C.mintBg} icon={Wallet} />
+        <StatCard label="Spent so far" value={m.totalSpent} accent={C.peachDeep} bg={C.peachBg} icon={TrendingUp} />
+        <StatCard label="Still available" value={remaining} accent={remaining >= 0 ? C.skyDeep : C.roseDeep}
+          bg={remaining >= 0 ? C.skyBg : C.roseBg} icon={PiggyBank} />
+      </div>
+
+      {/* Spend progress bar */}
+      <div style={sx.card}>
+        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+          <span style={{ fontSize: 13, fontWeight: 600, color: C.ink }}>Monthly spend pace</span>
+          <span style={{ fontSize: 13, color: C.inkSoft }}>{Math.round(spentPct)}% of income used</span>
+        </div>
+        <div style={sx.track}>
+          <div style={{
+            ...sx.fill, width: `${spentPct}%`,
+            background: spentPct > 90 ? C.roseDeep : spentPct > 70 ? C.butterDeep : C.mintDeep,
+          }} />
+        </div>
+        <p style={{ fontSize: 11.5, color: C.inkFaint, margin: "8px 0 0" }}>
+          {spentPct > 90
+            ? "You're close to spending your whole paycheck — ease off non-essentials."
+            : spentPct > 70
+            ? "On the higher side. Keep an eye on discretionary spending."
+            : "Comfortable pace — there's room to send more toward goals."}
+        </p>
+      </div>
+
+      {/* Charts */}
+      <div style={sx.chartRow}>
+        <div style={{ ...sx.card, flex: 1, minWidth: 240 }}>
+          <h4 style={sx.cardH4}>Where money went</h4>
+          {pieData.length > 0 ? (
+            <ResponsiveContainer width="100%" height={190}>
+              <PieChart>
+                <Pie data={pieData} dataKey="value" nameKey="name" innerRadius={42} outerRadius={68}
+                  paddingAngle={2}>
+                  {pieData.map((d, i) => <Cell key={i} fill={d.fill} />)}
+                </Pie>
+                <Tooltip formatter={(v) => `$${Math.round(v)}`} contentStyle={sx.tooltip} />
+              </PieChart>
+            </ResponsiveContainer>
+          ) : <EmptyMini text="Log expenses to see your breakdown" />}
+        </div>
+        <div style={{ ...sx.card, flex: 1.4, minWidth: 280 }}>
+          <h4 style={sx.cardH4}>Budget vs actual</h4>
+          <ResponsiveContainer width="100%" height={190}>
+            <BarChart data={barData} barGap={2}>
+              <CartesianGrid strokeDasharray="3 3" stroke={C.line} vertical={false} />
+              <XAxis dataKey="name" tick={{ fontSize: 10, fill: C.inkSoft }} axisLine={false} tickLine={false} />
+              <YAxis tick={{ fontSize: 10, fill: C.inkSoft }} axisLine={false} tickLine={false} width={32} />
+              <Tooltip formatter={(v) => `$${Math.round(v)}`} contentStyle={sx.tooltip} />
+              <Bar dataKey="Budget" fill={C.lav} radius={[4, 4, 0, 0]} />
+              <Bar dataKey="Spent" fill={C.lavDeep} radius={[4, 4, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      {/* Flags */}
+      <div style={sx.card}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+          <h4 style={{ ...sx.cardH4, margin: 0 }}>
+            <Sparkles size={14} color={C.lavDeep} style={{ verticalAlign: -2, marginRight: 5 }} />
+            What needs your attention
+          </h4>
+          <button style={sx.linkBtn} onClick={() => goTo("coach")}>
+            Ask the coach <ChevronRight size={13} />
+          </button>
+        </div>
+        {topFlags.length > 0 ? topFlags.map((f, i) => <InsightRow key={i} insight={f} />)
+          : <p style={{ fontSize: 12.5, color: C.mintDeep, margin: "10px 0 4px" }}>
+              <CheckCircle2 size={13} style={{ verticalAlign: -2, marginRight: 5 }} />
+              Nothing urgent — your budget looks healthy this month.
+            </p>}
+      </div>
+
+      {/* Goal snapshot */}
+      <div style={sx.card}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+          <h4 style={{ ...sx.cardH4, margin: 0 }}>Goal progress</h4>
+          <button style={sx.linkBtn} onClick={() => goTo("goals")}>All goals <ChevronRight size={13} /></button>
+        </div>
+        {state.goals.slice(0, 3).map((g) => {
+          const pct = g.target > 0 ? Math.min(100, (g.saved / g.target) * 100) : 0;
+          return (
+            <div key={g.id} style={{ marginBottom: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
+                <span style={{ fontSize: 12.5, fontWeight: 600, color: C.ink }}>
+                  {goalIcon(g.icon)} {g.name}
+                </span>
+                <span style={{ fontSize: 12, color: C.inkSoft }}>
+                  ${Math.round(g.saved).toLocaleString()} / ${Math.round(g.target).toLocaleString()}
+                </span>
+              </div>
+              <div style={sx.track}>
+                <div style={{ ...sx.fill, width: `${pct}%`, background: C.lavDeep }} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function StatCard({ label, value, accent, bg, icon: Icon }) {
+  return (
+    <div style={{ ...sx.statCard, background: bg }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+        <span style={{ fontSize: 11.5, color: C.inkSoft, fontWeight: 600 }}>{label}</span>
+        <Icon size={15} color={accent} />
+      </div>
+      <div style={{ fontSize: 22, fontWeight: 800, color: accent, marginTop: 6, letterSpacing: -0.5 }}>
+        ${Math.round(value).toLocaleString()}
+      </div>
+    </div>
+  );
+}
+
+function InsightRow({ insight }) {
+  const cfg = {
+    alert: { c: C.roseDeep, bg: C.roseBg, Icon: AlertTriangle },
+    warn: { c: C.butterDeep, bg: C.butterBg, Icon: AlertTriangle },
+    info: { c: C.skyDeep, bg: C.skyBg, Icon: Info },
+    good: { c: C.mintDeep, bg: C.mintBg, Icon: CheckCircle2 },
+  }[insight.sev];
+  const { Icon } = cfg;
+  return (
+    <div style={{ display: "flex", gap: 10, padding: "10px 0", borderBottom: `1px solid ${C.line}` }}>
+      <div style={{ width: 28, height: 28, borderRadius: 8, background: cfg.bg, display: "flex",
+        alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+        <Icon size={14} color={cfg.c} />
+      </div>
+      <div>
+        <div style={{ fontSize: 12.5, fontWeight: 700, color: C.ink }}>{insight.title}</div>
+        <div style={{ fontSize: 12, color: C.inkSoft, lineHeight: 1.55, marginTop: 2 }}>{insight.body}</div>
+      </div>
+    </div>
+  );
+}
+
+function goalIcon(key) {
+  const map = { shield: "🛡️", home: "🏠", plane: "✈️", hammer: "🔨", pig: "🐷", target: "🎯" };
+  return map[key] || "🎯";
+}
+
+function EmptyMini({ text }) {
+  return (
+    <div style={{ height: 170, display: "flex", alignItems: "center", justifyContent: "center",
+      color: C.inkFaint, fontSize: 12, textAlign: "center", padding: 20 }}>
+      {text}
+    </div>
+  );
+}
+
+function SectionTitle({ icon: Icon, title, subtitle }) {
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <h2 style={{ margin: 0, fontSize: 18, color: C.ink, display: "flex", alignItems: "center", gap: 8 }}>
+        <Icon size={19} color={C.lavDeep} /> {title}
+      </h2>
+      <p style={{ margin: "2px 0 0 27px", fontSize: 12.5, color: C.inkSoft }}>{subtitle}</p>
+    </div>
+  );
+}
+
+/* ============================================================
+   ENVELOPES — GUIDED SPENDING
+   ============================================================ */
+function Envelopes({ state, update }) {
+  const m = useMemo(() => buildInsights(state), [state]);
+  const [editing, setEditing] = useState(null);
+  const [adding, setAdding] = useState(false);
+
+  const totalBudget = state.envelopes.reduce((a, e) => a + e.budget, 0);
+  const unallocated = m.income - totalBudget;
+
+  const setBudget = (id, val) => {
+    update((s) => ({
+      ...s, envelopes: s.envelopes.map((e) => e.id === id ? { ...e, budget: Number(val) || 0 } : e),
+    }));
+  };
+  const removeEnv = (id) => {
+    update((s) => ({ ...s, envelopes: s.envelopes.filter((e) => e.id !== id) }));
+  };
+  const addEnv = (name, type) => {
+    const pal = state.envelopes.length % CATEGORY_PALETTE.length;
+    update((s) => ({
+      ...s, envelopes: [...s.envelopes, {
+        id: "e" + Date.now(), name, budget: 0, spent: 0, pal, type,
+      }],
+    }));
+    setAdding(false);
+  };
+
+  const groups = [
+    { type: "need", label: "Needs", desc: "Essentials you can't skip", color: C.skyDeep },
+    { type: "want", label: "Wants", desc: "Lifestyle & enjoyment", color: C.peachDeep },
+    { type: "save", label: "Save & invest", desc: "Future you", color: C.mintDeep },
+  ];
+
+  return (
+    <div>
+      <SectionTitle icon={Wallet} title="Spending envelopes"
+        subtitle="Give every dollar a job before the month starts" />
+
+      {/* Allocation banner */}
+      <div style={{ ...sx.card, background: unallocated < 0 ? C.roseBg : C.mintBg, border: "none" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <div style={{ fontSize: 12, color: C.inkSoft, fontWeight: 600 }}>
+              {unallocated < 0 ? "Over-allocated" : "Left to allocate"}
+            </div>
+            <div style={{ fontSize: 22, fontWeight: 800, marginTop: 2,
+              color: unallocated < 0 ? C.roseDeep : C.mintDeep }}>
+              ${Math.abs(Math.round(unallocated)).toLocaleString()}
+            </div>
+          </div>
+          <div style={{ textAlign: "right", fontSize: 11.5, color: C.inkSoft, maxWidth: 180 }}>
+            {unallocated < 0
+              ? "You've budgeted more than you earn. Trim an envelope."
+              : unallocated > 0
+              ? "Assign this to savings or a goal so no dollar sits idle."
+              : "Every dollar is assigned. This is a balanced budget."}
+          </div>
+        </div>
+      </div>
+
+      <div style={sx.eduStrip}>
+        <BookOpen size={14} color={C.lavDeep} />
+        <span><strong>The 50/30/20 idea:</strong> roughly 50% of take-home to needs, 30% to wants,
+          20% to saving. It's a starting frame, not a rule — adjust to your life.</span>
+      </div>
+
+      {groups.map((g) => {
+        const items = state.envelopes.filter((e) => e.type === g.type);
+        const gBudget = items.reduce((a, e) => a + e.budget, 0);
+        const gSpent = items.reduce((a, e) => a + e.spent, 0);
+        const gPct = m.income > 0 ? Math.round((gBudget / m.income) * 100) : 0;
+        return (
+          <div key={g.type} style={{ marginBottom: 18 }}>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 8 }}>
+              <span style={{ fontSize: 14, fontWeight: 700, color: g.color }}>{g.label}</span>
+              <span style={{ fontSize: 11.5, color: C.inkFaint }}>{g.desc}</span>
+              <span style={{ marginLeft: "auto", fontSize: 11.5, color: C.inkSoft }}>
+                {gPct}% of income · ${Math.round(gSpent)}/${Math.round(gBudget)}
+              </span>
+            </div>
+            {items.map((e) => {
+              const pal = CATEGORY_PALETTE[e.pal];
+              const pct = e.budget > 0 ? Math.min(100, (e.spent / e.budget) * 100) : 0;
+              const over = e.spent > e.budget && e.budget > 0;
+              return (
+                <div key={e.id} style={{ ...sx.envCard, borderLeft: `4px solid ${pal.dot}` }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: C.ink }}>{e.name}</span>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <span style={{ fontSize: 11.5, color: C.inkFaint }}>$</span>
+                      <input
+                        style={sx.miniInput}
+                        type="number"
+                        value={e.budget || ""}
+                        placeholder="0"
+                        onChange={(ev) => setBudget(e.id, ev.target.value)}
+                      />
+                      <button style={sx.miniIconBtn} onClick={() => removeEnv(e.id)} aria-label="Delete">
+                        <Trash2 size={13} color={C.inkFaint} />
+                      </button>
+                    </div>
+                  </div>
+                  <div style={{ ...sx.track, marginTop: 8, height: 7 }}>
+                    <div style={{ ...sx.fill, width: `${pct}%`,
+                      background: over ? C.roseDeep : pct > 85 ? C.butterDeep : pal.deep }} />
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 5 }}>
+                    <span style={{ fontSize: 11, color: over ? C.roseDeep : C.inkSoft }}>
+                      ${Math.round(e.spent)} spent{over ? ` · $${Math.round(e.spent - e.budget)} over` : ""}
+                    </span>
+                    <span style={{ fontSize: 11, color: C.inkFaint }}>
+                      ${Math.max(0, Math.round(e.budget - e.spent))} left
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })}
+
+      {adding ? (
+        <AddEnvelopeForm onAdd={addEnv} onCancel={() => setAdding(false)} />
+      ) : (
+        <button style={sx.dashedBtn} onClick={() => setAdding(true)}>
+          <Plus size={15} /> Add a new envelope
+        </button>
+      )}
+    </div>
+  );
+}
+
+function AddEnvelopeForm({ onAdd, onCancel }) {
+  const [name, setName] = useState("");
+  const [type, setType] = useState("want");
+  return (
+    <div style={sx.card}>
+      <h4 style={sx.cardH4}>New envelope</h4>
+      <input style={sx.input} placeholder="Envelope name (e.g. Gym, Gifts)" value={name}
+        onChange={(e) => setName(e.target.value)} />
+      <div style={{ display: "flex", gap: 6, margin: "10px 0" }}>
+        {[["need", "Need"], ["want", "Want"], ["save", "Save"]].map(([v, l]) => (
+          <button key={v} onClick={() => setType(v)} style={{
+            ...sx.chip,
+            background: type === v ? C.lavDeep : C.lavBg,
+            color: type === v ? "#fff" : C.lavDeep,
+          }}>{l}</button>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button style={sx.ghostBtn} onClick={onCancel}>Cancel</button>
+        <button style={{ ...sx.primaryBtn, opacity: name ? 1 : 0.5 }} disabled={!name}
+          onClick={() => onAdd(name, type)}>Add envelope</button>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   LEDGER — GRANULAR TRACKING (list/spreadsheet view)
+   ============================================================ */
+function Ledger({ state, update }) {
+  const [form, setForm] = useState({ desc: "", amount: "", envId: state.envelopes[0]?.id || "", date: today() });
+  const [filter, setFilter] = useState("all");
+
+  function today() { return new Date().toISOString().slice(0, 10); }
+
+  const addTxn = () => {
+    if (!form.desc || !form.amount) return;
+    const amt = Number(form.amount);
+    if (amt <= 0) return;
+    update((s) => ({
+      ...s,
+      transactions: [
+        { id: "t" + Date.now(), desc: form.desc, amount: amt, envId: form.envId, date: form.date },
+        ...s.transactions,
+      ],
+      envelopes: s.envelopes.map((e) => e.id === form.envId ? { ...e, spent: e.spent + amt } : e),
+    }));
+    setForm({ ...form, desc: "", amount: "" });
+  };
+
+  const delTxn = (t) => {
+    update((s) => ({
+      ...s,
+      transactions: s.transactions.filter((x) => x.id !== t.id),
+      envelopes: s.envelopes.map((e) => e.id === t.envId ? { ...e, spent: Math.max(0, e.spent - t.amount) } : e),
+    }));
+  };
+
+  const envName = (id) => state.envelopes.find((e) => e.id === id)?.name || "—";
+  const envPal = (id) => {
+    const e = state.envelopes.find((x) => x.id === id);
+    return e ? CATEGORY_PALETTE[e.pal] : CATEGORY_PALETTE[0];
+  };
+
+  const filtered = filter === "all" ? state.transactions
+    : state.transactions.filter((t) => t.envId === filter);
+  const total = filtered.reduce((a, t) => a + t.amount, 0);
+
+  return (
+    <div>
+      <SectionTitle icon={ListChecks} title="Expense ledger"
+        subtitle="Log every transaction — the granular truth of your spending" />
+
+      {/* Quick add */}
+      <div style={sx.card}>
+        <h4 style={sx.cardH4}>Log an expense</h4>
+        <div style={sx.ledgerForm}>
+          <input style={{ ...sx.input, flex: 2, minWidth: 130 }} placeholder="What did you buy?"
+            value={form.desc} onChange={(e) => setForm({ ...form, desc: e.target.value })} />
+          <input style={{ ...sx.input, flex: 1, minWidth: 90 }} type="number" placeholder="$ amount"
+            value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} />
+        </div>
+        <div style={{ ...sx.ledgerForm, marginTop: 8 }}>
+          <select style={{ ...sx.input, flex: 2, minWidth: 130 }} value={form.envId}
+            onChange={(e) => setForm({ ...form, envId: e.target.value })}>
+            {state.envelopes.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+          </select>
+          <input style={{ ...sx.input, flex: 1, minWidth: 90 }} type="date" value={form.date}
+            onChange={(e) => setForm({ ...form, date: e.target.value })} />
+        </div>
+        <button style={{ ...sx.primaryBtn, marginTop: 10, width: "100%",
+          opacity: form.desc && form.amount ? 1 : 0.5 }}
+          disabled={!form.desc || !form.amount} onClick={addTxn}>
+          <Plus size={15} /> Add to ledger
+        </button>
+      </div>
+
+      {/* Filter + total */}
+      <div style={{ display: "flex", gap: 8, alignItems: "center", margin: "4px 2px 12px", flexWrap: "wrap" }}>
+        <select style={{ ...sx.miniSelect }} value={filter} onChange={(e) => setFilter(e.target.value)}>
+          <option value="all">All envelopes</option>
+          {state.envelopes.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+        </select>
+        <span style={{ fontSize: 12, color: C.inkSoft, marginLeft: "auto" }}>
+          {filtered.length} item{filtered.length !== 1 ? "s" : ""} · <strong style={{ color: C.ink }}>
+            ${Math.round(total).toLocaleString()}</strong>
+        </span>
+      </div>
+
+      {/* Spreadsheet list */}
+      <div style={sx.card}>
+        {filtered.length === 0 ? (
+          <div style={{ textAlign: "center", padding: "30px 10px", color: C.inkFaint }}>
+            <Coffee size={26} color={C.inkFaint} />
+            <p style={{ fontSize: 12.5, marginTop: 8 }}>No expenses logged yet. Even that morning kopi counts!</p>
+          </div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={sx.table}>
+              <thead>
+                <tr>
+                  <th style={sx.th}>Date</th>
+                  <th style={sx.th}>Description</th>
+                  <th style={sx.th}>Envelope</th>
+                  <th style={{ ...sx.th, textAlign: "right" }}>Amount</th>
+                  <th style={sx.th}></th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((t) => {
+                  const pal = envPal(t.envId);
+                  return (
+                    <tr key={t.id}>
+                      <td style={sx.td}>{fmtDate(t.date)}</td>
+                      <td style={{ ...sx.td, fontWeight: 600, color: C.ink }}>{t.desc}</td>
+                      <td style={sx.td}>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+                          <span style={{ width: 8, height: 8, borderRadius: 3, background: pal.dot }} />
+                          <span style={{ fontSize: 11.5 }}>{envName(t.envId)}</span>
+                        </span>
+                      </td>
+                      <td style={{ ...sx.td, textAlign: "right", fontWeight: 700, color: C.ink }}>
+                        ${t.amount.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                      </td>
+                      <td style={{ ...sx.td, textAlign: "right" }}>
+                        <button style={sx.miniIconBtn} onClick={() => delTxn(t)} aria-label="Delete">
+                          <Trash2 size={13} color={C.inkFaint} />
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function fmtDate(d) {
+  try {
+    return new Date(d).toLocaleDateString("en-SG", { day: "2-digit", month: "short" });
+  } catch { return d; }
+}
+
+/* ============================================================
+   GOALS — MILESTONE TRACKING
+   ============================================================ */
+const GOAL_PRESETS = [
+  { icon: "shield", name: "Emergency Fund", hint: "3-6 months of expenses" },
+  { icon: "home", name: "BTO Down Payment", hint: "~10-25% of flat price" },
+  { icon: "hammer", name: "Renovation Fund", hint: "$30k-60k typical for BTO" },
+  { icon: "plane", name: "Travel Fund", hint: "Your next big trip" },
+  { icon: "pig", name: "Investment Pot", hint: "Money to put to work" },
+];
+
+function Goals({ state, update }) {
+  const [adding, setAdding] = useState(false);
+  const [contributeTo, setContributeTo] = useState(null);
+
+  const addGoal = (g) => {
+    update((s) => ({
+      ...s, goals: [...s.goals, {
+        id: "g" + Date.now(), name: g.name, icon: g.icon,
+        target: g.target, saved: 0, deadline: g.deadline || "", note: g.note || "",
+      }],
+    }));
+    setAdding(false);
+  };
+  const delGoal = (id) => update((s) => ({ ...s, goals: s.goals.filter((g) => g.id !== id) }));
+  const contribute = (id, amt) => {
+    update((s) => ({
+      ...s, goals: s.goals.map((g) => g.id === id ? { ...g, saved: g.saved + amt } : g),
+    }));
+    setContributeTo(null);
+  };
+
+  return (
+    <div>
+      <SectionTitle icon={Target} title="Goal trackers"
+        subtitle="Big plans become real when you can see the milestones" />
+
+      <div style={sx.eduStrip}>
+        <Lightbulb size={14} color={C.butterDeep} />
+        <span><strong>Order matters:</strong> fully fund your emergency goal first, then split surplus
+          between mid-term goals (travel, reno) and long-term investing. Don't invest money you'll need within ~3 years.</span>
+      </div>
+
+      {state.goals.map((g) => {
+        const pct = g.target > 0 ? Math.min(100, (g.saved / g.target) * 100) : 0;
+        const done = pct >= 100;
+        const monthsLeft = g.deadline ? monthsBetween(new Date(), new Date(g.deadline)) : null;
+        const perMonth = monthsLeft && monthsLeft > 0 ? (g.target - g.saved) / monthsLeft : null;
+        return (
+          <div key={g.id} style={sx.goalCard}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+              <div style={{ display: "flex", gap: 10 }}>
+                <div style={sx.goalIcon}>{goalIcon(g.icon)}</div>
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: C.ink }}>{g.name}</div>
+                  <div style={{ fontSize: 11.5, color: C.inkSoft }}>
+                    ${Math.round(g.saved).toLocaleString()} of ${Math.round(g.target).toLocaleString()}
+                    {done && <span style={{ color: C.mintDeep, fontWeight: 700 }}> · Reached! 🎉</span>}
+                  </div>
+                </div>
+              </div>
+              <button style={sx.miniIconBtn} onClick={() => delGoal(g.id)} aria-label="Delete">
+                <Trash2 size={13} color={C.inkFaint} />
+              </button>
+            </div>
+
+            <div style={{ ...sx.track, marginTop: 10, height: 9 }}>
+              <div style={{ ...sx.fill, width: `${pct}%`,
+                background: done ? C.mintDeep : C.lavDeep }} />
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 5 }}>
+              <span style={{ fontSize: 11, color: C.inkFaint }}>{Math.round(pct)}% there</span>
+              {perMonth !== null && perMonth > 0 && (
+                <span style={{ fontSize: 11, color: C.skyDeep, fontWeight: 600 }}>
+                  Save ${Math.round(perMonth)}/mo to hit your date
+                </span>
+              )}
+            </div>
+
+            {g.note && (
+              <p style={{ fontSize: 11.5, color: C.inkSoft, margin: "8px 0 0", lineHeight: 1.5,
+                background: C.bg, padding: "6px 9px", borderRadius: 7 }}>
+                {g.note}
+              </p>
+            )}
+
+            {contributeTo === g.id ? (
+              <ContributeForm onAdd={(amt) => contribute(g.id, amt)} onCancel={() => setContributeTo(null)} />
+            ) : (
+              <button style={{ ...sx.softBtn, marginTop: 10 }} onClick={() => setContributeTo(g.id)}>
+                <Plus size={13} /> Add money to this goal
+              </button>
+            )}
+          </div>
+        );
+      })}
+
+      {adding ? (
+        <AddGoalForm onAdd={addGoal} onCancel={() => setAdding(false)} />
+      ) : (
+        <button style={sx.dashedBtn} onClick={() => setAdding(true)}>
+          <Plus size={15} /> Create a new goal
+        </button>
+      )}
+    </div>
+  );
+}
+
+function ContributeForm({ onAdd, onCancel }) {
+  const [amt, setAmt] = useState("");
+  return (
+    <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+      <input style={{ ...sx.input, flex: 1 }} type="number" placeholder="$ amount" value={amt}
+        onChange={(e) => setAmt(e.target.value)} autoFocus />
+      <button style={{ ...sx.primaryBtn, flex: "0 0 auto" }}
+        onClick={() => { const n = Number(amt); if (n > 0) onAdd(n); }}>Add</button>
+      <button style={{ ...sx.ghostBtn, flex: "0 0 auto" }} onClick={onCancel}>
+        <X size={14} />
+      </button>
+    </div>
+  );
+}
+
+function AddGoalForm({ onAdd, onCancel }) {
+  const [preset, setPreset] = useState(GOAL_PRESETS[1]);
+  const [name, setName] = useState(GOAL_PRESETS[1].name);
+  const [target, setTarget] = useState("");
+  const [deadline, setDeadline] = useState("");
+  return (
+    <div style={sx.card}>
+      <h4 style={sx.cardH4}>New goal</h4>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+        {GOAL_PRESETS.map((p) => (
+          <button key={p.icon} onClick={() => { setPreset(p); setName(p.name); }} style={{
+            ...sx.chip, fontSize: 11,
+            background: preset.icon === p.icon ? C.lavDeep : C.lavBg,
+            color: preset.icon === p.icon ? "#fff" : C.lavDeep,
+          }}>{goalIcon(p.icon)} {p.name}</button>
+        ))}
+      </div>
+      <p style={{ fontSize: 11.5, color: C.inkFaint, margin: "0 0 10px" }}>{preset.hint}</p>
+      <Field label="Goal name">
+        <input style={sx.input} value={name} onChange={(e) => setName(e.target.value)} />
+      </Field>
+      <Field label="Target amount (SGD)">
+        <input style={sx.input} type="number" value={target} placeholder="e.g. 20000"
+          onChange={(e) => setTarget(e.target.value)} />
+      </Field>
+      <Field label="Target date (optional)">
+        <input style={sx.input} type="month" value={deadline}
+          onChange={(e) => setDeadline(e.target.value)} />
+      </Field>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button style={sx.ghostBtn} onClick={onCancel}>Cancel</button>
+        <button style={{ ...sx.primaryBtn, opacity: name && target ? 1 : 0.5 }}
+          disabled={!name || !target}
+          onClick={() => onAdd({ icon: preset.icon, name, target: Number(target),
+            deadline, note: preset.hint })}>
+          Create goal
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function monthsBetween(a, b) {
+  return (b.getFullYear() - a.getFullYear()) * 12 + (b.getMonth() - a.getMonth());
+}
+
+/* ============================================================
+   AI COACH — CONVERSATIONAL UI
+   ============================================================ */
+const STARTER_QUESTIONS = [
+  "How am I doing this month?",
+  "Where should I cut back?",
+  "How do I start investing in Singapore?",
+  "How much should I save for a BTO?",
+  "Explain CPF like I'm new to this.",
+];
+
+function buildContextSummary(state) {
+  const m = buildInsights(state);
+  const env = state.envelopes.map((e) =>
+    `${e.name} (${e.type}): budget $${e.budget}, spent $${e.spent}`).join("; ");
+  const goals = state.goals.map((g) =>
+    `${g.name}: $${g.saved}/$${g.target}`).join("; ");
+  const flags = m.insights.map((i) => `[${i.sev}] ${i.title}`).join("; ");
+  return `User profile: name ${state.profile.name}, gross salary $${state.profile.grossSalary}/mo, ` +
+    `estimated take-home $${Math.round(m.income)}/mo (after CPF). ` +
+    `They are a fresh graduate in Singapore starting their first full-time job, with low financial literacy. ` +
+    `Envelopes: ${env}. Total budgeted $${Math.round(m.totalBudget)}, total spent $${Math.round(m.totalSpent)}. ` +
+    `Goals: ${goals}. Current flags: ${flags}.`;
+}
+
+function offlineReply(question, state) {
+  const m = buildInsights(state);
+  const q = question.toLowerCase();
+  if (q.includes("how am i") || q.includes("doing")) {
+    const top = m.insights.slice(0, 2).map((i) => `• ${i.title}: ${i.body}`).join("\n\n");
+    return `Here's your month so far — take-home around $${Math.round(m.income)}, spent $${Math.round(m.totalSpent)}.\n\n${top || "Nothing alarming. Keep logging expenses so I can spot trends."}`;
+  }
+  if (q.includes("cut") || q.includes("reduce") || q.includes("save money")) {
+    const wants = state.envelopes.filter((e) => e.type === "want").sort((a, b) => b.spent - a.spent)[0];
+    return `The fastest wins are usually in 'wants'. Your biggest one right now is ${wants ? wants.name + ` at $${Math.round(wants.spent)}` : "not yet logged"}. Try a one-week no-spend challenge there, audit subscriptions you forgot about, and cook two more meals a week. Small recurring cuts beat big one-off sacrifices.`;
+  }
+  if (q.includes("invest")) {
+    return `Starting out in Singapore, a sensible order is:\n\n1. Build your emergency fund fully first.\n2. Make sure no high-interest debt exists.\n3. Then invest regularly — many beginners use a low-cost globally-diversified index fund or ETF, often through a regular savings plan so you invest a fixed sum monthly (this is 'dollar-cost averaging').\n\nKey principles: keep fees low, diversify broadly, invest only money you won't need for 3+ years, and don't try to time the market. This is education, not advice — read up via MoneySense (the government's financial literacy site).`;
+  }
+  if (q.includes("bto") || q.includes("flat") || q.includes("house")) {
+    return `For a BTO flat: your CPF Ordinary Account (OA) does a lot of the heavy lifting — that's the ~62% of your CPF contributions you saw at setup. The cash you'll personally need covers things like the option fee, part of the down payment not coverable by CPF, and renovation. A common approach is a dedicated 'BTO down payment' goal plus a separate 'renovation' goal ($30k-60k is typical). Set target dates and the tracker will tell you how much to set aside monthly.`;
+  }
+  if (q.includes("cpf")) {
+    const c = m.cpf;
+    return `CPF is Singapore's forced-savings system. From your salary, 20% goes in as your contribution and your employer adds 17%. For you that's roughly:\n\n• Ordinary Account (~$${Math.round(c.oa)}/mo) — housing, and can be invested\n• Special Account (~$${Math.round(c.sa)}/mo) — retirement, earns higher interest\n• MediSave (~$${Math.round(c.ma)}/mo) — healthcare costs and insurance\n\nIt feels like 'lost' salary but it's genuinely yours — it's funding your future flat and retirement automatically.`;
+  }
+  if (q.includes("emergency")) {
+    const g = state.goals.find((x) => x.icon === "shield");
+    return `Your emergency fund is the cash cushion for job loss, medical surprises, or urgent repairs — without borrowing. Aim for 3-6 months of essential expenses${g ? `, so about $${Math.round(g.target)} for you` : ""}. Keep it somewhere safe and accessible (a high-yield savings account), not invested. This comes before investing — always.`;
+  }
+  if (q.includes("debt") || q.includes("loan") || q.includes("credit card")) {
+    return `Debt strategy in order of priority:\n\n1. High-interest debt first — credit card debt in Singapore often runs ~25%/year. Clear this before investing or even before topping up savings beyond a starter buffer.\n2. Pay your credit card in full every month. Treat it like a debit card, not extra money.\n3. Lower-interest debt (student loans, etc.) can be paid down steadily while you also save.\n\nThe logic: paying off 25% debt is a guaranteed 25% return — no investment reliably beats that.`;
+  }
+  if (q.includes("insurance")) {
+    return `As a fresh grad, insurance basics worth knowing:\n\n• MediShield Life (via CPF MediSave) covers large hospital bills — you already have this.\n• Many people add an Integrated Shield Plan for better ward coverage.\n• Term life / personal accident insurance matters most once others depend on your income.\n\nGeneral guidance: insure against things that would be financially catastrophic, don't over-insure small risks, and be cautious with policies that bundle investing and insurance — they're often costly. Verify specifics with MoneySense.`;
+  }
+  if (q.includes("save") && (q.includes("how much") || q.includes("rate") || q.includes("percent"))) {
+    const rate = m.income > 0 ? Math.round((m.saveBudget / m.income) * 100) : 0;
+    return `You're currently budgeting about ${rate}% of take-home pay to savings. As a fresh grad — usually low fixed costs, possibly living with family — this is your golden window. Aiming for 20%+ now compounds enormously over a career. If you can hit 30-40% early, even better. Automate it: treat savings as a bill that's paid the day your salary lands, before you can spend it.`;
+  }
+  if (q.includes("budget") || q.includes("envelope") || q.includes("50/30/20") || q.includes("50 30 20")) {
+    return `The envelope method gives every dollar a job before the month starts. The 50/30/20 frame is a starting point: ~50% of take-home to needs (rent, food, transport, bills), ~30% to wants (dining, shopping, fun), ~20% to saving and investing.\n\nIf you live with family rent-free, your 'needs' will be far below 50% — push that surplus into saving instead. The tool flags when an envelope is nearly used up so you can slow down before overspending.`;
+  }
+  if (q.includes("travel") || q.includes("holiday") || q.includes("trip")) {
+    return `Travel is a 'sinking fund' — you save gradually for a known future expense instead of taking a big hit in one month. Create a Travel goal, set the target cost and the trip date, and the tracker tells you the monthly amount. Saving $200/mo for 10 months is painless; finding $2,000 the month before is stressful. Keep this money in cash savings, not invested — the timeline is too short for market risk.`;
+  }
+  if (q.includes("reno")) {
+    return `Renovation for a BTO typically runs $30k-60k depending on flat size and how much you do. It can't be paid with CPF (unlike the flat itself), so it needs to be cash. Treat it as its own goal with its own target date — usually keyed to when you collect keys. Because the timeline is several years out but fixed, keep most of it in safe savings as the date approaches rather than invested.`;
+  }
+  if (q.includes("start") || q.includes("begin") || q.includes("first")) {
+    return `If you're just starting out, here's a simple order:\n\n1. Track every expense for one month so you know your real numbers.\n2. Build a starter buffer of $1,000, then grow it to a full 3-6 month emergency fund.\n3. Clear any high-interest debt.\n4. Once the safety net is full, start investing a fixed sum monthly into something low-cost and diversified.\n5. Layer in goals — travel, BTO, reno — as sinking funds with target dates.\n\nDon't rush steps 4 and 5. The foundation matters more than the speed.`;
+  }
+  return `I can help with budgeting, cutting costs, CPF, investing basics, debt, insurance, savings rate, and planning big goals like a BTO, renovation, or travel. Try one of the suggested questions, or ask me something specific about your numbers. (Tip: the more you log in the Ledger, the sharper my advice gets.)`;
+}
+
+function Coach({ state, update }) {
+  const [messages, setMessages] = useState(state.chatHistory || []);
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const scrollRef = React.useRef(null);
+
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [messages, busy]);
+
+  const persist = (msgs) => {
+    setMessages(msgs);
+    update((s) => ({ ...s, chatHistory: msgs.slice(-30) }));
+  };
+
+  const send = async (text) => {
+    const q = (text || input).trim();
+    if (!q || busy) return;
+    const next = [...messages, { role: "user", content: q }];
+    persist(next);
+    setInput("");
+
+    // Offline mode: instant, free, zero tokens. No network call at all.
+    if (state.coachMode !== "ai") {
+      setBusy(true);
+      setTimeout(() => {
+        persist([...next, { role: "assistant", content: offlineReply(q, state) }]);
+        setBusy(false);
+      }, 250);
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const context = buildContextSummary(state);
+      const system = `You are a warm, encouraging personal finance coach for a fresh graduate in Singapore ` +
+        `who is just starting their first job and has low financial literacy. Be concrete, kind, and practical. ` +
+        `Use Singapore context (CPF, BTO, HDB, MoneySense, SGD). Keep replies under 160 words, conversational, ` +
+        `and free of jargon unless you explain it. When relevant, reference their actual numbers. ` +
+        `Always frame investing guidance as general education, never as personalised financial advice, ` +
+        `and remind them to verify with official sources for big decisions. ` +
+        `Here is their current financial data: ${context}`;
+      // Token economy: only send last 4 turns, cap output low.
+      const apiMessages = next.slice(-4).map((m) => ({ role: m.role, content: m.content }));
+
+      const apiKey = import.meta.env.VITE_ANTHROPIC_API_KEY;
+      if (!apiKey) throw new Error("no-key");
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-access": "true",
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 600,
+          system,
+          messages: apiMessages,
+        }),
+      });
+      if (!res.ok) throw new Error("api");
+      const data = await res.json();
+      const reply = data.content.filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+      persist([...next, { role: "assistant", content: reply || offlineReply(q, state) }]);
+    } catch (e) {
+      persist([...next, { role: "assistant", content: offlineReply(q, state) }]);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const aiMode = state.coachMode === "ai";
+  const setMode = (mode) => update((s) => ({ ...s, coachMode: mode }));
+
+  return (
+    <div>
+      <SectionTitle icon={Sparkles} title="AI money coach"
+        subtitle="Ask anything — it knows your numbers and Singapore's system" />
+
+      <div style={sx.modeBar}>
+        <div style={{ display: "flex", gap: 4, background: C.bg, borderRadius: 9, padding: 3 }}>
+          <button onClick={() => setMode("offline")} style={{
+            ...sx.modeBtn,
+            background: !aiMode ? C.mintDeep : "transparent",
+            color: !aiMode ? "#fff" : C.inkSoft,
+          }}>Free mode</button>
+          <button onClick={() => setMode("ai")} style={{
+            ...sx.modeBtn,
+            background: aiMode ? C.lavDeep : "transparent",
+            color: aiMode ? "#fff" : C.inkSoft,
+          }}>AI mode</button>
+        </div>
+        <span style={{ fontSize: 10.5, color: C.inkFaint, lineHeight: 1.4, flex: 1 }}>
+          {aiMode
+            ? "Richer answers via Anthropic API. Uses tokens — needs Pro / API access."
+            : "Built-in SG knowledge base. Instant, zero tokens, works forever."}
+        </span>
+      </div>
+
+      <div style={sx.chatWindow} ref={scrollRef}>
+        {messages.length === 0 && (
+          <div style={{ textAlign: "center", padding: "20px 12px" }}>
+            <div style={{ ...sx.logoMark, margin: "0 auto 10px", width: 40, height: 40 }}>
+              <Sparkles size={20} color="#fff" />
+            </div>
+            <p style={{ fontSize: 13, color: C.ink, fontWeight: 600, margin: 0 }}>
+              Hi {state.profile.name}! I'm your money coach.
+            </p>
+            <p style={{ fontSize: 12, color: C.inkSoft, margin: "4px 0 0", lineHeight: 1.5 }}>
+              I can see your budget and goals. Ask me how you're doing, what to cut,
+              or how to start investing. Pick a question to begin:
+            </p>
+          </div>
+        )}
+        {messages.map((m, i) => (
+          <div key={i} style={{
+            display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start",
+            marginBottom: 10,
+          }}>
+            <div style={m.role === "user" ? sx.bubbleUser : sx.bubbleAi}>
+              {m.content.split("\n").map((line, j) => (
+                <p key={j} style={{ margin: j === 0 ? 0 : "6px 0 0", whiteSpace: "pre-wrap" }}>{line}</p>
+              ))}
+            </div>
+          </div>
+        ))}
+        {busy && (
+          <div style={{ display: "flex", justifyContent: "flex-start" }}>
+            <div style={{ ...sx.bubbleAi, color: C.inkFaint }}>
+              <span className="typing">Thinking</span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {messages.length === 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, margin: "10px 2px" }}>
+          {STARTER_QUESTIONS.map((q) => (
+            <button key={q} style={sx.suggestChip} onClick={() => send(q)}>{q}</button>
+          ))}
+        </div>
+      )}
+
+      <div style={sx.chatInputRow}>
+        <input
+          style={{ ...sx.input, flex: 1, marginBottom: 0 }}
+          placeholder="Ask your money coach…"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") send(); }}
+        />
+        <button style={{ ...sx.primaryBtn, flex: "0 0 auto", padding: "0 14px",
+          opacity: input.trim() && !busy ? 1 : 0.5 }}
+          disabled={!input.trim() || busy} onClick={() => send()}>
+          <ArrowRight size={16} />
+        </button>
+      </div>
+      <p style={{ fontSize: 10.5, color: C.inkFaint, textAlign: "center", margin: "8px 0 0" }}>
+        Educational guidance only — not licensed financial advice.
+      </p>
+    </div>
+  );
+}
+
+/* ============================================================
+   STYLES
+   ============================================================ */
+const sx = {
+  app: {
+    fontFamily: "'Nunito', 'Segoe UI', system-ui, sans-serif",
+    background: C.bg, color: C.ink, maxWidth: 760, margin: "0 auto",
+    borderRadius: 18, overflow: "hidden", border: `1px solid ${C.line}`,
+  },
+  header: {
+    display: "flex", justifyContent: "space-between", alignItems: "center",
+    padding: "16px 18px", background: C.card, borderBottom: `1px solid ${C.line}`,
+    position: "relative",
+  },
+  logoMark: {
+    width: 38, height: 38, borderRadius: 12, background: `linear-gradient(135deg, ${C.lavDeep}, ${C.lav})`,
+    display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+  },
+  nav: {
+    display: "flex", gap: 4, padding: "10px 12px", background: C.card,
+    borderBottom: `1px solid ${C.line}`, overflowX: "auto",
+  },
+  navBtn: {
+    display: "flex", alignItems: "center", gap: 6, padding: "8px 13px",
+    borderRadius: 11, border: "none", cursor: "pointer", fontSize: 12.5,
+    fontWeight: 700, fontFamily: "inherit", whiteSpace: "nowrap",
+    transition: "all .18s ease",
+  },
+  main: { padding: "18px 16px 8px" },
+  footer: {
+    fontSize: 10, color: C.inkFaint, textAlign: "center", padding: "10px 16px 16px",
+    lineHeight: 1.5,
+  },
+  card: {
+    background: C.card, borderRadius: 14, padding: "14px 16px",
+    border: `1px solid ${C.line}`, marginBottom: 14,
+  },
+  cardH4: { margin: "0 0 10px", fontSize: 13, fontWeight: 700, color: C.ink },
+  statRow: { display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" },
+  statCard: {
+    flex: 1, minWidth: 150, borderRadius: 14, padding: "13px 15px",
+  },
+  chartRow: { display: "flex", gap: 12, flexWrap: "wrap" },
+  track: {
+    height: 8, background: C.line, borderRadius: 99, overflow: "hidden", width: "100%",
+  },
+  fill: { height: "100%", borderRadius: 99, transition: "width .4s ease" },
+  tooltip: {
+    background: C.card, border: `1px solid ${C.line}`, borderRadius: 10,
+    fontSize: 11.5, fontFamily: "'Nunito', sans-serif",
+  },
+  linkBtn: {
+    display: "flex", alignItems: "center", gap: 2, background: "none", border: "none",
+    color: C.lavDeep, fontSize: 11.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+  },
+  // onboarding
+  onbWrap: { padding: "22px 20px 26px" },
+  onbDots: { display: "flex", gap: 6, margin: "16px 0" },
+  onbDot: { height: 5, flex: 1, borderRadius: 99, transition: "background .3s" },
+  onbCard: {
+    background: C.card, borderRadius: 16, padding: "20px 18px", border: `1px solid ${C.line}`,
+  },
+  onbBadge: {
+    display: "inline-flex", alignItems: "center", gap: 5, background: C.lavBg,
+    color: C.lavDeep, fontSize: 11, fontWeight: 800, padding: "4px 10px",
+    borderRadius: 99, marginBottom: 10,
+  },
+  onbH2: { margin: "0 0 6px", fontSize: 18, color: C.ink, letterSpacing: -0.3 },
+  onbP: { fontSize: 13, color: C.inkSoft, lineHeight: 1.6, margin: "0 0 16px" },
+  cpfBox: {
+    background: C.skyBg, borderRadius: 12, padding: "12px 13px", margin: "4px 0 16px",
+  },
+  cpfGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(95px,1fr))", gap: 6 },
+  tipBox: {
+    display: "flex", gap: 9, background: C.butterBg, borderRadius: 12,
+    padding: "11px 12px", margin: "4px 0 16px", alignItems: "flex-start",
+  },
+  eduStrip: {
+    display: "flex", gap: 8, alignItems: "flex-start", background: C.lavBg,
+    borderRadius: 11, padding: "10px 12px", marginBottom: 14, fontSize: 11.5,
+    color: C.ink, lineHeight: 1.55,
+  },
+  // inputs
+  label: { display: "block", fontSize: 12, fontWeight: 700, color: C.inkSoft, marginBottom: 5 },
+  input: {
+    width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${C.line}`,
+    fontSize: 13, fontFamily: "inherit", color: C.ink, background: C.bg,
+    boxSizing: "border-box", outline: "none",
+  },
+  miniInput: {
+    width: 70, padding: "5px 8px", borderRadius: 8, border: `1px solid ${C.line}`,
+    fontSize: 12.5, fontFamily: "inherit", color: C.ink, background: C.bg,
+    textAlign: "right", outline: "none", fontWeight: 700,
+  },
+  miniSelect: {
+    padding: "6px 10px", borderRadius: 9, border: `1px solid ${C.line}`,
+    fontSize: 12, fontFamily: "inherit", color: C.ink, background: C.card, outline: "none",
+  },
+  primaryBtn: {
+    display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+    padding: "11px 16px", borderRadius: 11, border: "none", cursor: "pointer",
+    background: C.lavDeep, color: "#fff", fontSize: 13, fontWeight: 800,
+    fontFamily: "inherit", flex: 1, transition: "transform .1s",
+  },
+  ghostBtn: {
+    padding: "11px 16px", borderRadius: 11, border: `1px solid ${C.line}`,
+    cursor: "pointer", background: C.card, color: C.inkSoft, fontSize: 13,
+    fontWeight: 700, fontFamily: "inherit",
+  },
+  softBtn: {
+    display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
+    padding: "8px 12px", borderRadius: 9, border: `1px solid ${C.lav}`,
+    cursor: "pointer", background: C.lavBg, color: C.lavDeep, fontSize: 11.5,
+    fontWeight: 700, fontFamily: "inherit", width: "100%",
+  },
+  dashedBtn: {
+    display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+    padding: "13px", borderRadius: 12, border: `1.5px dashed ${C.lav}`,
+    cursor: "pointer", background: "transparent", color: C.lavDeep, fontSize: 12.5,
+    fontWeight: 700, fontFamily: "inherit", width: "100%", marginBottom: 14,
+  },
+  iconBtn: {
+    width: 34, height: 34, borderRadius: 9, border: `1px solid ${C.line}`,
+    background: C.card, cursor: "pointer", display: "flex", alignItems: "center",
+    justifyContent: "center",
+  },
+  miniIconBtn: {
+    width: 26, height: 26, borderRadius: 7, border: "none", background: "transparent",
+    cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+  },
+  chip: {
+    padding: "6px 12px", borderRadius: 99, border: "none", cursor: "pointer",
+    fontSize: 11.5, fontWeight: 800, fontFamily: "inherit", flex: 1,
+  },
+  // envelope
+  envCard: {
+    background: C.card, borderRadius: 11, padding: "11px 13px",
+    border: `1px solid ${C.line}`, marginBottom: 8,
+  },
+  // ledger
+  ledgerForm: { display: "flex", gap: 8, flexWrap: "wrap" },
+  table: { width: "100%", borderCollapse: "collapse", fontSize: 12 },
+  th: {
+    textAlign: "left", padding: "6px 8px", fontSize: 10.5, fontWeight: 800,
+    color: C.inkFaint, textTransform: "uppercase", letterSpacing: 0.4,
+    borderBottom: `1px solid ${C.line}`,
+  },
+  td: { padding: "9px 8px", borderBottom: `1px solid ${C.line}`, color: C.inkSoft },
+  // goal
+  goalCard: {
+    background: C.card, borderRadius: 14, padding: "14px 15px",
+    border: `1px solid ${C.line}`, marginBottom: 12,
+  },
+  goalIcon: {
+    width: 38, height: 38, borderRadius: 11, background: C.lavBg,
+    display: "flex", alignItems: "center", justifyContent: "center", fontSize: 19,
+    flexShrink: 0,
+  },
+  // chat
+  chatWindow: {
+    background: C.card, borderRadius: 14, border: `1px solid ${C.line}`,
+    padding: "14px", height: 340, overflowY: "auto", marginBottom: 4,
+  },
+  bubbleUser: {
+    background: C.lavDeep, color: "#fff", padding: "9px 13px", borderRadius: "13px 13px 4px 13px",
+    fontSize: 12.5, maxWidth: "78%", lineHeight: 1.5,
+  },
+  bubbleAi: {
+    background: C.bg, color: C.ink, padding: "9px 13px", borderRadius: "13px 13px 13px 4px",
+    fontSize: 12.5, maxWidth: "85%", lineHeight: 1.55, border: `1px solid ${C.line}`,
+  },
+  suggestChip: {
+    padding: "7px 12px", borderRadius: 99, border: `1px solid ${C.lav}`,
+    background: C.lavBg, color: C.lavDeep, fontSize: 11.5, fontWeight: 700,
+    cursor: "pointer", fontFamily: "inherit",
+  },
+  chatInputRow: { display: "flex", gap: 8, marginTop: 8 },
+  modeBar: {
+    display: "flex", alignItems: "center", gap: 10, marginBottom: 10,
+    background: C.card, borderRadius: 11, padding: "8px 10px", border: `1px solid ${C.line}`,
+  },
+  modeBtn: {
+    padding: "5px 11px", borderRadius: 7, border: "none", cursor: "pointer",
+    fontSize: 11, fontWeight: 800, fontFamily: "inherit", whiteSpace: "nowrap",
+  },
+  // modal
+  modalOverlay: {
+    position: "absolute", inset: 0, background: "rgba(58,58,74,0.35)",
+    display: "flex", alignItems: "flex-start", justifyContent: "center",
+    paddingTop: 70, zIndex: 50,
+  },
+  modal: {
+    background: C.card, borderRadius: 16, padding: "18px", width: 300,
+    border: `1px solid ${C.line}`,
+  },
+};
+
+const globalCss = `
+  @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&display=swap');
+  * { box-sizing: border-box; }
+  ::-webkit-scrollbar { width: 7px; height: 7px; }
+  ::-webkit-scrollbar-thumb { background: ${C.line}; border-radius: 99px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  input:focus, select:focus { border-color: ${C.lavDeep} !important; }
+  button:active { transform: scale(0.97); }
+  .typing::after { content: '...'; animation: dots 1.2s infinite; }
+  @keyframes dots { 0%,20%{content:'.'} 40%{content:'..'} 60%,100%{content:'...'} }
+  @media (max-width: 520px) {
+    .navLabel { display: none; }
+  }
+`;
