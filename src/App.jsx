@@ -4,7 +4,7 @@ import {
   TrendingUp, AlertTriangle, CheckCircle2, Info, PiggyBank, Home,
   Plane, Hammer, ShieldCheck, ArrowRight, Pencil, X, GraduationCap,
   BookOpen, Coffee, Lightbulb, ChevronRight, Settings, Briefcase, Landmark,
-  RefreshCw, HandCoins, BellRing, CalendarClock
+  RefreshCw, HandCoins, BellRing, CalendarClock, Download, Upload
 } from "lucide-react";
 import {
   PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis,
@@ -586,7 +586,9 @@ function SettingsPanel({ state, update, close }) {
           </div>
         )}
 
-        <button style={{ ...sx.ghostBtn, marginTop: 16, width: "100%", color: C.peachDeep }}
+        <BackupSection state={state} update={update} close={close} />
+
+        <button style={{ ...sx.ghostBtn, marginTop: 12, width: "100%", color: C.peachDeep }}
           onClick={() => {
             if (confirm("Reset everything? This clears all your data permanently.")) {
               update({ ...DEFAULT_STATE });
@@ -596,6 +598,96 @@ function SettingsPanel({ state, update, close }) {
           Reset all data
         </button>
       </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   BACKUP — JSON export / import for moving between devices
+   ============================================================ */
+function BackupSection({ state, update, close }) {
+  const fileRef = React.useRef(null);
+  const [msg, setMsg] = useState(null);
+
+  const doExport = () => {
+    try {
+      const payload = {
+        app: "BudgetBuddy SG",
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        data: state,
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `budgetbuddy-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setMsg({ ok: true, text: "Backup file downloaded." });
+    } catch (e) {
+      setMsg({ ok: false, text: "Export failed — try again." });
+    }
+  };
+
+  const doImport = (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result);
+        // Accept either a wrapped export or a raw state object.
+        const incoming = parsed && parsed.data ? parsed.data : parsed;
+        if (!incoming || typeof incoming !== "object" || !("envelopes" in incoming)) {
+          throw new Error("shape");
+        }
+        if (!confirm("Importing will replace all current data on this device with the backup. Continue?")) {
+          return;
+        }
+        // Merge onto DEFAULT_STATE so any newer fields missing from an old
+        // backup get sensible defaults instead of undefined.
+        update({ ...DEFAULT_STATE, ...incoming, onboarded: true });
+        setMsg({ ok: true, text: "Backup restored. Reopening…" });
+        setTimeout(close, 900);
+      } catch (err) {
+        setMsg({ ok: false, text: "That file isn't a valid BudgetBuddy backup." });
+      }
+    };
+    reader.onerror = () => setMsg({ ok: false, text: "Couldn't read that file." });
+    reader.readAsText(file);
+    e.target.value = "";
+  };
+
+  return (
+    <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${C.line}` }}>
+      <div style={{ fontSize: 12, fontWeight: 700, color: C.inkSoft, marginBottom: 6 }}>
+        Backup &amp; transfer
+      </div>
+      <p style={{ fontSize: 11.5, color: C.inkFaint, margin: "0 0 10px", lineHeight: 1.5 }}>
+        Your data lives only in this browser. Export a backup file to keep it safe or move it
+        to another device, then import it there.
+      </p>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button style={{ ...sx.softBtn, flex: 1 }} onClick={doExport}>
+          <Download size={13} /> Export backup
+        </button>
+        <button style={{ ...sx.softBtn, flex: 1 }} onClick={() => fileRef.current && fileRef.current.click()}>
+          <Upload size={13} /> Import backup
+        </button>
+      </div>
+      <input ref={fileRef} type="file" accept="application/json,.json"
+        onChange={doImport} style={{ display: "none" }} />
+      {msg && (
+        <p style={{
+          fontSize: 11, margin: "8px 0 0", fontWeight: 600,
+          color: msg.ok ? C.mintDeep : C.roseDeep,
+        }}>
+          {msg.text}
+        </p>
+      )}
     </div>
   );
 }

@@ -23,6 +23,7 @@ The tool was first built as a Claude artifact. Artifacts are great but live insi
 - **Owed (reminders)** — track money owed to you: who owes it, what for, and how much. Each reminder can be one-time or recurring (daily/weekly/monthly) with an optional end date. Overdue items are flagged.
 - **Ledger** — granular, spreadsheet-style expense tracking; each entry updates its envelope.
 - **Goals** — milestone tracking for Emergency Fund, BTO, Renovation, Travel, and investing.
+- **Backup & transfer** — export your full profile to a JSON file and import it on another device, from the Settings panel.
 - **AI Coach** — a conversational money coach with two modes (see below).
 
 ## The two Coach modes — this is the important part for cost

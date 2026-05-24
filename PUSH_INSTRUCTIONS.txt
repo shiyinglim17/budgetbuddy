@@ -1,37 +1,49 @@
-HOW TO PUSH THIS TO YOUR GITHUB REPO
-=====================================
+HOW TO PUSH BUDGETBUDDY TO YOUR GITHUB REPO
+============================================
 
-This folder is already a git repository. It has one commit and your
-remote (https://github.com/shiyinglim17/budgetbuddy.git) is already set.
-You just need to push it.
+This folder is a complete, ready-to-go git repository. It already has
+all commits and your remote is already configured. You have NOT pushed
+anything yet, so this is a clean first push — no merging needed.
 
-STEP 1 — Unzip this folder somewhere on your computer.
-
+------------------------------------------------------------
+STEP 1 — Unzip this folder somewhere permanent on your computer
+         (e.g. Documents/budgetbuddy). This folder IS your project.
+------------------------------------------------------------
 STEP 2 — Open a terminal inside the unzipped folder and run:
 
     git push -u origin main
 
-GitHub will ask you to authenticate. Use either:
-  - A Personal Access Token as the password
-    (GitHub.com -> Settings -> Developer settings -> Personal access tokens),
-  - or the GitHub CLI: run "gh auth login" first, then push.
+When prompted to log in, use either:
+  - Your GitHub username + a Personal Access Token as the password
+    (github.com -> Settings -> Developer settings ->
+     Personal access tokens -> generate one with "repo" scope), OR
+  - The GitHub CLI: run "gh auth login" once, then push.
 
-That's it. Your repo is now on GitHub.
-
-STEP 3 (optional, recommended) — Turn on free hosting:
-  On GitHub: your repo -> Settings -> Pages -> Build and deployment
-  -> Source -> select "GitHub Actions".
-  The included workflow then builds and publishes the app automatically.
-  Your tool will live at:
+That's it. All files and the full commit history are now on GitHub.
+------------------------------------------------------------
+STEP 3 (recommended) — Turn on free hosting:
+  On GitHub: your repo -> Settings -> Pages ->
+  Build and deployment -> Source -> choose "GitHub Actions".
+  The included workflow then builds and publishes automatically on
+  every push. Your tool will be live at:
     https://shiyinglim17.github.io/budgetbuddy/
-
+------------------------------------------------------------
 STEP 4 — To run it locally any time:
-    npm install
+
+    npm install      (only needed the first time)
     npm run dev
 
-NOTE ON node_modules: this zip does NOT include the node_modules folder
-(it's large and rebuildable). Running "npm install" recreates it. This is
-normal and expected for any git repo.
+------------------------------------------------------------
+FUTURE EDITS
+  After this first push, you don't need zips anymore. To change
+  anything: edit src/App.jsx, then run:
+    git add -A
+    git commit -m "describe your change"
+    git push
+  GitHub Pages redeploys itself within a minute or two.
 
-See README.md for full details, including the Free vs AI Coach modes
-and how to keep daily use at zero cost.
+NOTE: node_modules is intentionally NOT in this zip (it's large and
+rebuildable). "npm install" recreates it. This is normal for git repos.
+
+See README.md for full details on features, the Free vs AI Coach
+modes, and keeping daily use at zero cost.
