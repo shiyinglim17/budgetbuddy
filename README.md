@@ -15,7 +15,9 @@ The tool was first built as a Claude artifact. Artifacts are great but live insi
 
 ## Features
 
-- **Dashboard** — macro view of income, spending pace, budget-vs-actual, and flagged issues.
+- **Dashboard** — macro view of income, spending pace, budget-vs-actual, net worth, and flagged issues.
+- **Net worth tracker** — record current holdings across savings account, fixed deposit, investments, CPF, cash, and other; editable anytime from the Dashboard. Liquid vs. longer-term assets are distinguished so the emergency fund is sized correctly.
+- **Salary updates with history** — change your salary anytime in Settings (e.g. when you switch jobs or get a raise); every change is logged with a date and reason so you keep an earning history.
 - **Envelopes** — guided spending with a 50/30/20 starter split you can adjust.
 - **Ledger** — granular, spreadsheet-style expense tracking; each entry updates its envelope.
 - **Goals** — milestone tracking for Emergency Fund, BTO, Renovation, Travel, and investing.

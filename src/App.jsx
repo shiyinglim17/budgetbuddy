@@ -3,7 +3,7 @@ import {
   LayoutDashboard, Wallet, ListChecks, Target, Sparkles, Plus, Trash2,
   TrendingUp, AlertTriangle, CheckCircle2, Info, PiggyBank, Home,
   Plane, Hammer, ShieldCheck, ArrowRight, Pencil, X, GraduationCap,
-  BookOpen, Coffee, Lightbulb, ChevronRight, Settings
+  BookOpen, Coffee, Lightbulb, ChevronRight, Settings, Briefcase, Landmark
 } from "lucide-react";
 import {
   PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis,
@@ -87,6 +87,20 @@ function cpfBreakdown(grossMonthly) {
   };
 }
 
+/* Asset types for the net-worth profile. Liquidity flags whether the money
+   is readily spendable — used to size the emergency fund correctly. */
+const ASSET_TYPES = [
+  { key: "savings", label: "Savings account", icon: "💰", liquid: true, pal: 1 },
+  { key: "fd", label: "Fixed deposit", icon: "🏦", liquid: false, pal: 3 },
+  { key: "investments", label: "Investments", icon: "📈", liquid: false, pal: 0 },
+  { key: "cpf", label: "CPF balance", icon: "🇸🇬", liquid: false, pal: 6 },
+  { key: "cash", label: "Cash on hand", icon: "💵", liquid: true, pal: 5 },
+  { key: "other", label: "Other", icon: "📦", liquid: false, pal: 4 },
+];
+function assetType(key) {
+  return ASSET_TYPES.find((a) => a.key === key) || ASSET_TYPES[5];
+}
+
 const DEFAULT_STATE = {
   onboarded: false,
   // "offline" = free, self-contained knowledge base (works after Pro ends, zero token cost)
@@ -99,6 +113,10 @@ const DEFAULT_STATE = {
     currentSavings: 0,
     startWorkMonth: "",
   },
+  // Salary change log — appended every time salary is updated, newest first.
+  salaryHistory: [],
+  // Current assets across all account types — stored locally only.
+  assets: [],
   // Envelope budget categories (50/30/20-inspired but editable)
   envelopes: [
     { id: "e1", name: "Rent / Housing", budget: 0, spent: 0, pal: 0, type: "need" },
@@ -216,14 +234,19 @@ export default function App() {
 function Onboarding({ state, update }) {
   const [step, setStep] = useState(0);
   const [form, setForm] = useState({
-    name: "", grossSalary: "", currentSavings: "", startWorkMonth: "",
+    name: "", grossSalary: "", startWorkMonth: "",
+    assetAmounts: {}, // keyed by asset type
   });
+
+  const totalAssets = Object.values(form.assetAmounts).reduce((a, v) => a + (Number(v) || 0), 0);
+  // Liquid assets = the cash that can actually back an emergency fund.
+  const liquidAssets = ASSET_TYPES.filter((t) => t.liquid)
+    .reduce((a, t) => a + (Number(form.assetAmounts[t.key]) || 0), 0);
 
   const finish = () => {
     const gross = Number(form.grossSalary) || 0;
     const cpf = cpfBreakdown(gross);
     const takeHome = cpf.takeHome;
-    // 50/30/20 starter allocation on take-home pay
     const needs = takeHome * 0.5;
     const wants = takeHome * 0.3;
     const save = takeHome * 0.2;
@@ -236,6 +259,13 @@ function Onboarding({ state, update }) {
       { id: "e6", name: "Shopping", budget: Math.round(wants * 0.45), spent: 0, pal: 5, type: "want" },
       { id: "e7", name: "Savings & Invest", budget: Math.round(save), spent: 0, pal: 6, type: "save" },
     ];
+    // Turn the entered amounts into asset records.
+    const assets = ASSET_TYPES
+      .filter((t) => Number(form.assetAmounts[t.key]) > 0)
+      .map((t) => ({
+        id: "a" + t.key, type: t.key, label: t.label,
+        amount: Number(form.assetAmounts[t.key]),
+      }));
     update({
       ...state,
       onboarded: true,
@@ -243,14 +273,19 @@ function Onboarding({ state, update }) {
         name: form.name || "there",
         grossSalary: gross,
         monthlyIncomeOther: 0,
-        currentSavings: Number(form.currentSavings) || 0,
+        currentSavings: liquidAssets,
         startWorkMonth: form.startWorkMonth,
       },
+      assets,
+      salaryHistory: gross > 0
+        ? [{ id: "sh0", date: new Date().toISOString().slice(0, 10), from: 0, to: gross, reason: "Starting salary" }]
+        : [],
       envelopes,
       goals: [
         {
           id: "g1", name: "Emergency Fund", icon: "shield",
-          target: Math.round(needs * 6), saved: Number(form.currentSavings) || 0,
+          target: Math.round(needs * 6),
+          saved: liquidAssets, // only liquid cash counts toward the safety net
           deadline: "", note: "3-6 months of expenses. Build this FIRST, before investing.",
         },
       ],
@@ -258,6 +293,8 @@ function Onboarding({ state, update }) {
   };
 
   const cpf = form.grossSalary ? cpfBreakdown(Number(form.grossSalary)) : null;
+  const setAsset = (key, val) =>
+    setForm({ ...form, assetAmounts: { ...form.assetAmounts, [key]: val } });
 
   return (
     <div style={{ ...sx.app, minHeight: 520 }}>
@@ -354,19 +391,46 @@ function Onboarding({ state, update }) {
             <span style={sx.onbBadge}><PiggyBank size={13} /> Your starting point</span>
             <h2 style={sx.onbH2}>What have you saved so far?</h2>
             <p style={sx.onbP}>
-              Include cash savings and any bank balance you'd use for emergencies. Even $0 is a perfectly
-              fine starting point — everyone begins somewhere.
+              Enter what you have in each place. Leave anything blank if it doesn't apply —
+              even all-zero is a perfectly fine start. This stays on your device only.
             </p>
-            <Field label="Current cash savings (SGD)">
-              <input style={sx.input} type="number" value={form.currentSavings}
-                onChange={(e) => setForm({ ...form, currentSavings: e.target.value })}
-                placeholder="e.g. 3000" />
-            </Field>
+
+            {ASSET_TYPES.map((t) => (
+              <div key={t.key} style={{ marginBottom: 10 }}>
+                <label style={sx.label}>
+                  {t.icon} {t.label}
+                  {t.liquid && <span style={sx.liquidTag}>counts for emergencies</span>}
+                </label>
+                <input style={sx.input} type="number"
+                  value={form.assetAmounts[t.key] || ""}
+                  onChange={(e) => setAsset(t.key, e.target.value)}
+                  placeholder="0" />
+              </div>
+            ))}
+
+            {totalAssets > 0 && (
+              <div style={{ ...sx.cpfBox, background: C.mintBg }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                  <span style={{ fontSize: 12, color: C.inkSoft, fontWeight: 700 }}>Total net worth</span>
+                  <span style={{ fontSize: 16, fontWeight: 800, color: C.mintDeep }}>
+                    ${Math.round(totalAssets).toLocaleString()}
+                  </span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span style={{ fontSize: 11, color: C.inkFaint }}>Liquid (emergency-ready)</span>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: C.skyDeep }}>
+                    ${Math.round(liquidAssets).toLocaleString()}
+                  </span>
+                </div>
+              </div>
+            )}
+
             <div style={sx.tipBox}>
               <Lightbulb size={15} color={C.butterDeep} />
               <p style={{ margin: 0, fontSize: 12.5, color: C.ink, lineHeight: 1.6 }}>
-                I'll create your first goal automatically: an <strong>emergency fund</strong> worth
-                ~6 months of expenses. This is the foundation — it goes before any investing.
+                I'll create an <strong>emergency fund</strong> goal worth ~6 months of expenses.
+                Only your <strong>liquid</strong> savings (savings account, cash) count toward it —
+                fixed deposits and investments aren't quickly spendable in a crisis.
               </p>
             </div>
             <div style={{ display: "flex", gap: 10 }}>
@@ -428,25 +492,96 @@ function Header({ state, update }) {
 
 function SettingsPanel({ state, update, close }) {
   const [gross, setGross] = useState(state.profile.grossSalary);
+  const [reason, setReason] = useState("");
+  const history = state.salaryHistory || [];
+  const changed = Number(gross) !== state.profile.grossSalary && gross !== "";
+
+  const saveSalary = () => {
+    const newSalary = Number(gross) || 0;
+    if (newSalary === state.profile.grossSalary) { close(); return; }
+    const entry = {
+      id: "sh" + Date.now(),
+      date: new Date().toISOString().slice(0, 10),
+      from: state.profile.grossSalary,
+      to: newSalary,
+      reason: reason.trim() || "Salary updated",
+    };
+    update((s) => ({
+      ...s,
+      profile: { ...s.profile, grossSalary: newSalary },
+      salaryHistory: [entry, ...(s.salaryHistory || [])].slice(0, 40),
+    }));
+    close();
+  };
+
   return (
     <div style={sx.modalOverlay} onClick={close}>
-      <div style={sx.modal} onClick={(e) => e.stopPropagation()}>
+      <div style={{ ...sx.modal, width: 330, maxHeight: "82vh", overflowY: "auto" }}
+        onClick={(e) => e.stopPropagation()}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
           <h3 style={{ margin: 0, fontSize: 16, color: C.ink }}>Settings</h3>
           <button style={sx.iconBtn} onClick={close}><X size={16} color={C.inkSoft} /></button>
         </div>
+
+        <div style={{ ...sx.eduStrip, marginBottom: 12 }}>
+          <Briefcase size={14} color={C.lavDeep} />
+          <span>Changed jobs or got a raise? Update your salary here anytime — each change is logged so you can see your earning history.</span>
+        </div>
+
         <Field label="Gross monthly salary (SGD)">
           <input style={sx.input} type="number" value={gross}
-            onChange={(e) => setGross(e.target.value)} />
+            onChange={(e) => setGross(e.target.value)} placeholder="e.g. 4800" />
         </Field>
-        <button style={sx.primaryBtn} onClick={() => {
-          update((s) => ({ ...s, profile: { ...s.profile, grossSalary: Number(gross) || 0 } }));
-          close();
-        }}>Save changes</button>
-        <button style={{ ...sx.ghostBtn, marginTop: 10, width: "100%", color: C.peachDeep }}
+        {changed && (
+          <Field label="Reason for change (optional)">
+            <input style={sx.input} value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="e.g. New job at..., Annual increment" />
+          </Field>
+        )}
+        <button style={sx.primaryBtn} onClick={saveSalary}>
+          {changed ? "Save salary change" : "Done"}
+        </button>
+
+        {changed && (
+          <p style={{ fontSize: 11, color: C.skyDeep, margin: "8px 0 0", lineHeight: 1.5 }}>
+            Note: this updates your income figure. Your envelope budgets stay as-is —
+            review them on the Envelopes tab to re-balance against your new income.
+          </p>
+        )}
+
+        {history.length > 0 && (
+          <div style={{ marginTop: 16 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: C.inkSoft, marginBottom: 8 }}>
+              Salary history
+            </div>
+            {history.map((h) => {
+              const up = h.to >= h.from;
+              return (
+                <div key={h.id} style={sx.histRow}>
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: C.ink }}>{h.reason}</div>
+                    <div style={{ fontSize: 10.5, color: C.inkFaint }}>{fmtDate(h.date)}</div>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: up ? C.mintDeep : C.peachDeep }}>
+                      ${Math.round(h.to).toLocaleString()}
+                    </div>
+                    <div style={{ fontSize: 10, color: C.inkFaint }}>
+                      from ${Math.round(h.from).toLocaleString()}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        <button style={{ ...sx.ghostBtn, marginTop: 16, width: "100%", color: C.peachDeep }}
           onClick={() => {
             if (confirm("Reset everything? This clears all your data permanently.")) {
               update({ ...DEFAULT_STATE });
+              close();
             }
           }}>
           Reset all data
@@ -667,6 +802,9 @@ function Dashboard({ state, update, goTo }) {
             </p>}
       </div>
 
+      {/* Net worth */}
+      <NetWorthCard state={state} update={update} />
+
       {/* Goal snapshot */}
       <div style={sx.card}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
@@ -696,8 +834,150 @@ function Dashboard({ state, update, goTo }) {
   );
 }
 
-function StatCard({ label, value, accent, bg, icon: Icon }) {
+/* ============================================================
+   NET WORTH — editable assets, stored locally only
+   ============================================================ */
+function NetWorthCard({ state, update }) {
+  const [editing, setEditing] = useState(false);
+  const assets = state.assets || [];
+  const total = assets.reduce((a, x) => a + x.amount, 0);
+  const liquid = assets.filter((x) => assetType(x.type).liquid).reduce((a, x) => a + x.amount, 0);
+
+  const pieData = assets
+    .filter((x) => x.amount > 0)
+    .map((x) => ({
+      name: x.label,
+      value: x.amount,
+      fill: CATEGORY_PALETTE[assetType(x.type).pal].dot,
+    }));
+
   return (
+    <div style={sx.card}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+        <h4 style={{ ...sx.cardH4, margin: 0 }}>
+          <Landmark size={14} color={C.lavDeep} style={{ verticalAlign: -2, marginRight: 5 }} />
+          Net worth
+        </h4>
+        <button style={sx.linkBtn} onClick={() => setEditing(!editing)}>
+          {editing ? "Done" : "Update"} <Pencil size={12} />
+        </button>
+      </div>
+
+      {total === 0 && !editing && (
+        <p style={{ fontSize: 12, color: C.inkFaint, margin: "6px 0" }}>
+          No assets added yet. Tap "Update" to record what you have across savings, fixed deposits,
+          investments, and CPF.
+        </p>
+      )}
+
+      {total > 0 && !editing && (
+        <>
+          <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
+            <div style={{ width: 110, height: 110, flexShrink: 0 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie data={pieData} dataKey="value" nameKey="name" innerRadius={30} outerRadius={50}
+                    paddingAngle={2}>
+                    {pieData.map((d, i) => <Cell key={i} fill={d.fill} />)}
+                  </Pie>
+                  <Tooltip formatter={(v) => `$${Math.round(v).toLocaleString()}`} contentStyle={sx.tooltip} />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 11, color: C.inkFaint, fontWeight: 600 }}>Total net worth</div>
+              <div style={{ fontSize: 24, fontWeight: 800, color: C.lavDeep, letterSpacing: -0.5 }}>
+                ${Math.round(total).toLocaleString()}
+              </div>
+              <div style={{ fontSize: 11, color: C.skyDeep, marginTop: 2 }}>
+                ${Math.round(liquid).toLocaleString()} liquid · ${Math.round(total - liquid).toLocaleString()} longer-term
+              </div>
+            </div>
+          </div>
+          <div style={{ marginTop: 10 }}>
+            {assets.filter((x) => x.amount > 0).map((x) => {
+              const t = assetType(x.type);
+              return (
+                <div key={x.id} style={{ display: "flex", justifyContent: "space-between",
+                  padding: "5px 0", fontSize: 12 }}>
+                  <span style={{ color: C.inkSoft }}>
+                    <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 3,
+                      background: CATEGORY_PALETTE[t.pal].dot, marginRight: 7 }} />
+                    {t.icon} {x.label}
+                  </span>
+                  <span style={{ fontWeight: 700, color: C.ink }}>
+                    ${Math.round(x.amount).toLocaleString()}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {editing && <AssetEditor state={state} update={update} />}
+    </div>
+  );
+}
+
+function AssetEditor({ state, update }) {
+  const assets = state.assets || [];
+  const amountFor = (key) => {
+    const a = assets.find((x) => x.type === key);
+    return a ? a.amount : "";
+  };
+  const setAmount = (key, val) => {
+    const num = Number(val) || 0;
+    update((s) => {
+      const existing = (s.assets || []).filter((x) => x.type !== key);
+      const t = assetType(key);
+      const nextAssets = num > 0
+        ? [...existing, { id: "a" + key, type: key, label: t.label, amount: num }]
+        : existing;
+      // keep liquid total synced into profile.currentSavings + emergency goal
+      const liquid = nextAssets.filter((x) => assetType(x.type).liquid)
+        .reduce((a, x) => a + x.amount, 0);
+      return {
+        ...s,
+        assets: nextAssets,
+        profile: { ...s.profile, currentSavings: liquid },
+      };
+    });
+  };
+
+  return (
+    <div style={{ marginTop: 6 }}>
+      <div style={{ ...sx.eduStrip, marginBottom: 12 }}>
+        <ShieldCheck size={14} color={C.skyDeep} />
+        <span>All amounts stay on this device only. Update these whenever your balances change —
+          your net worth and emergency-fund progress update automatically.</span>
+      </div>
+      {ASSET_TYPES.map((t) => (
+        <div key={t.key} style={sx.assetCard}>
+          <div style={{ ...sx.assetIcon, background: CATEGORY_PALETTE[t.pal].bg }}>{t.icon}</div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 700, color: C.ink }}>{t.label}</div>
+            <div style={{ fontSize: 10, color: C.inkFaint }}>
+              {t.liquid ? "Liquid — backs your emergency fund" : "Longer-term — not for emergencies"}
+            </div>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <span style={{ fontSize: 11.5, color: C.inkFaint }}>$</span>
+            <input
+              style={sx.miniInput}
+              type="number"
+              value={amountFor(t.key)}
+              placeholder="0"
+              onChange={(e) => setAmount(t.key, e.target.value)}
+            />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function StatCard({ label, value, accent, bg, icon: Icon }) {  return (
     <div style={{ ...sx.statCard, background: bg }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
         <span style={{ fontSize: 11.5, color: C.inkSoft, fontWeight: 600 }}>{label}</span>
@@ -1245,9 +1525,16 @@ function buildContextSummary(state) {
   const goals = state.goals.map((g) =>
     `${g.name}: $${g.saved}/$${g.target}`).join("; ");
   const flags = m.insights.map((i) => `[${i.sev}] ${i.title}`).join("; ");
+  const assets = (state.assets || []).length
+    ? (state.assets || []).map((a) => `${a.label} $${Math.round(a.amount)}`).join("; ")
+    : "none recorded yet";
+  const netWorth = (state.assets || []).reduce((a, x) => a + x.amount, 0);
+  const salChanges = (state.salaryHistory || []).length;
   return `User profile: name ${state.profile.name}, gross salary $${state.profile.grossSalary}/mo, ` +
     `estimated take-home $${Math.round(m.income)}/mo (after CPF). ` +
     `They are a fresh graduate in Singapore starting their first full-time job, with low financial literacy. ` +
+    `Assets: ${assets}. Total net worth $${Math.round(netWorth)}. ` +
+    `Salary has been updated ${salChanges} time(s). ` +
     `Envelopes: ${env}. Total budgeted $${Math.round(m.totalBudget)}, total spent $${Math.round(m.totalSpent)}. ` +
     `Goals: ${goals}. Current flags: ${flags}.`;
 }
@@ -1276,6 +1563,13 @@ function offlineReply(question, state) {
   if (q.includes("emergency")) {
     const g = state.goals.find((x) => x.icon === "shield");
     return `Your emergency fund is the cash cushion for job loss, medical surprises, or urgent repairs — without borrowing. Aim for 3-6 months of essential expenses${g ? `, so about $${Math.round(g.target)} for you` : ""}. Keep it somewhere safe and accessible (a high-yield savings account), not invested. This comes before investing — always.`;
+  }
+  if (q.includes("net worth") || q.includes("networth") || q.includes("assets") || q.includes("how much do i have")) {
+    const assets = state.assets || [];
+    const total = assets.reduce((a, x) => a + x.amount, 0);
+    const liquid = assets.filter((x) => assetType(x.type).liquid).reduce((a, x) => a + x.amount, 0);
+    if (total === 0) return `You haven't recorded any assets yet. On the Dashboard, tap "Update" on the Net worth card to enter what you have in your savings account, fixed deposits, investments, and CPF. It's stored only on your device.`;
+    return `Your recorded net worth is $${Math.round(total).toLocaleString()}. Of that, $${Math.round(liquid).toLocaleString()} is liquid — money you could actually reach in an emergency (savings account, cash). The rest sits in less-accessible places like fixed deposits, investments, or CPF.\n\nWhy the split matters: only liquid money should back your emergency fund. CPF and locked deposits are real wealth but can't be tapped for a surprise bill. Keep updating these balances as they change so your picture stays accurate.`;
   }
   if (q.includes("debt") || q.includes("loan") || q.includes("credit card")) {
     return `Debt strategy in order of priority:\n\n1. High-interest debt first — credit card debt in Singapore often runs ~25%/year. Clear this before investing or even before topping up savings beyond a starter buffer.\n2. Pay your credit card in full every month. Treat it like a debit card, not extra money.\n3. Lower-interest debt (student loans, etc.) can be paid down steadily while you also save.\n\nThe logic: paying off 25% debt is a guaranteed 25% return — no investment reliably beats that.`;
@@ -1552,6 +1846,10 @@ const sx = {
   },
   // inputs
   label: { display: "block", fontSize: 12, fontWeight: 700, color: C.inkSoft, marginBottom: 5 },
+  liquidTag: {
+    fontSize: 9.5, fontWeight: 800, color: C.skyDeep, background: C.skyBg,
+    padding: "2px 6px", borderRadius: 5, marginLeft: 6,
+  },
   input: {
     width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${C.line}`,
     fontSize: 13, fontFamily: "inherit", color: C.ink, background: C.bg,
@@ -1662,6 +1960,19 @@ const sx = {
   modal: {
     background: C.card, borderRadius: 16, padding: "18px", width: 300,
     border: `1px solid ${C.line}`,
+  },
+  histRow: {
+    display: "flex", justifyContent: "space-between", alignItems: "center",
+    padding: "8px 0", borderBottom: `1px solid ${C.line}`,
+  },
+  assetCard: {
+    display: "flex", alignItems: "center", gap: 10, background: C.card,
+    borderRadius: 11, padding: "10px 12px", border: `1px solid ${C.line}`,
+    marginBottom: 8,
+  },
+  assetIcon: {
+    width: 36, height: 36, borderRadius: 10, display: "flex",
+    alignItems: "center", justifyContent: "center", fontSize: 17, flexShrink: 0,
   },
 };
 
