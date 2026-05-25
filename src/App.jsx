@@ -47,7 +47,6 @@ const CATEGORY_PALETTE = [
 const STORE_KEY = "budgetbuddy:state:v1";
 
 // Standalone build: persists to the browser's localStorage.
-// Data stays on this device, survives refreshes, costs nothing, needs no account.
 async function loadState() {
   try {
     const raw = localStorage.getItem(STORE_KEY);
@@ -811,13 +810,6 @@ function Dashboard({ state, update, goTo }) {
     .filter((e) => e.spent > 0)
     .map((e) => ({ name: e.name, value: e.spent, fill: CATEGORY_PALETTE[e.pal].dot }));
 
-  const barData = state.envelopes.map((e) => ({
-    name: e.name.split(" ")[0],
-    Budget: e.budget,
-    Spent: e.spent,
-    fill: CATEGORY_PALETTE[e.pal].deep,
-  }));
-
   const topFlags = m.insights.filter((i) => i.sev === "alert" || i.sev === "warn").slice(0, 3);
 
   return (
@@ -852,37 +844,6 @@ function Dashboard({ state, update, goTo }) {
             ? "On the higher side. Keep an eye on discretionary spending."
             : "Comfortable pace — there's room to send more toward goals."}
         </p>
-      </div>
-
-      {/* Charts */}
-      <div style={sx.chartRow}>
-        <div style={{ ...sx.card, flex: 1, minWidth: 240 }}>
-          <h4 style={sx.cardH4}>Where money went</h4>
-          {pieData.length > 0 ? (
-            <ResponsiveContainer width="100%" height={190}>
-              <PieChart>
-                <Pie data={pieData} dataKey="value" nameKey="name" innerRadius={42} outerRadius={68}
-                  paddingAngle={2}>
-                  {pieData.map((d, i) => <Cell key={i} fill={d.fill} />)}
-                </Pie>
-                <Tooltip formatter={(v) => `$${Math.round(v)}`} contentStyle={sx.tooltip} />
-              </PieChart>
-            </ResponsiveContainer>
-          ) : <EmptyMini text="Log expenses to see your breakdown" />}
-        </div>
-        <div style={{ ...sx.card, flex: 1.4, minWidth: 280 }}>
-          <h4 style={sx.cardH4}>Budget vs actual</h4>
-          <ResponsiveContainer width="100%" height={190}>
-            <BarChart data={barData} barGap={2}>
-              <CartesianGrid strokeDasharray="3 3" stroke={C.line} vertical={false} />
-              <XAxis dataKey="name" tick={{ fontSize: 10, fill: C.inkSoft }} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fontSize: 10, fill: C.inkSoft }} axisLine={false} tickLine={false} width={32} />
-              <Tooltip formatter={(v) => `$${Math.round(v)}`} contentStyle={sx.tooltip} />
-              <Bar dataKey="Budget" fill={C.lav} radius={[4, 4, 0, 0]} />
-              <Bar dataKey="Spent" fill={C.lavDeep} radius={[4, 4, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
       </div>
 
       {/* Flags */}
@@ -933,6 +894,55 @@ function Dashboard({ state, update, goTo }) {
             </div>
           );
         })}
+      </div>
+
+      {/* Charts — pushed to bottom */}
+      <div style={sx.chartRow}>
+        <div style={{ ...sx.card, flex: 1, minWidth: 240 }}>
+          <h4 style={sx.cardH4}>Where money went</h4>
+          {pieData.length > 0 ? (
+            <ResponsiveContainer width="100%" height={190}>
+              <PieChart>
+                <Pie data={pieData} dataKey="value" nameKey="name" innerRadius={42} outerRadius={68}
+                  paddingAngle={2}>
+                  {pieData.map((d, i) => <Cell key={i} fill={d.fill} />)}
+                </Pie>
+                <Tooltip formatter={(v) => `$${Math.round(v)}`} contentStyle={sx.tooltip} />
+              </PieChart>
+            </ResponsiveContainer>
+          ) : <EmptyMini text="Log expenses to see your breakdown" />}
+        </div>
+        <div style={{ ...sx.card, flex: 1.4, minWidth: 280 }}>
+          <h4 style={sx.cardH4}>Envelope health</h4>
+          {state.envelopes.filter((e) => e.budget > 0).length > 0 ? (
+            <div>
+              {state.envelopes.filter((e) => e.budget > 0).map((e) => {
+                const pctE = Math.min(100, (e.spent / e.budget) * 100);
+                const over = e.spent > e.budget;
+                const pal = CATEGORY_PALETTE[e.pal];
+                return (
+                  <div key={e.id} style={{ marginBottom: 10 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, fontWeight: 700, color: C.ink }}>
+                        <span style={{ width: 7, height: 7, borderRadius: 3, background: pal.dot, display: "inline-block" }} />
+                        {e.name}
+                      </div>
+                      <span style={{ fontSize: 10.5, fontWeight: 700,
+                        color: over ? C.roseDeep : pctE > 85 ? C.butterDeep : C.inkFaint }}>
+                        {over ? `$${Math.round(e.spent - e.budget)} over` :
+                          `$${Math.round(e.budget - e.spent)} left`}
+                      </span>
+                    </div>
+                    <div style={{ ...sx.track, height: 6, marginTop: 4 }}>
+                      <div style={{ ...sx.fill, width: `${pctE}%`,
+                        background: over ? C.roseDeep : pctE > 85 ? C.butterDeep : pal.deep }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : <EmptyMini text="Set envelope budgets to track health" />}
+        </div>
       </div>
     </div>
   );
@@ -1944,6 +1954,28 @@ function Subscriptions({ state, update }) {
   }));
   const del = (id) => update((st) => ({ ...st, subscriptions: st.subscriptions.filter((s) => s.id !== id) }));
 
+  // Record a subscription payment: adds ledger txn + updates envelope spent + advances renewal date.
+  const recordPayment = (sub) => {
+    const envId = subsEnvelope ? subsEnvelope.id : (state.envelopes[0]?.id || "");
+    update((st) => ({
+      ...st,
+      transactions: [
+        {
+          id: "t" + Date.now(),
+          desc: `${sub.name} (subscription)`,
+          amount: sub.cost,
+          envId,
+          date: new Date().toISOString().slice(0, 10),
+        },
+        ...st.transactions,
+      ],
+      envelopes: st.envelopes.map((e) =>
+        e.id === envId ? { ...e, spent: e.spent + sub.cost } : e),
+      subscriptions: st.subscriptions.map((s) =>
+        s.id === sub.id ? { ...s, nextRenew: advanceDate(sub.nextRenew || todayISO(), sub.cycle === "yearly" ? "monthly" : sub.cycle) } : s),
+    }));
+  };
+
   // Push the computed monthly total into the subscriptions envelope budget.
   const syncToEnvelope = () => {
     if (!subsEnvelope) return;
@@ -2027,6 +2059,13 @@ function Subscriptions({ state, update }) {
               </span>
             </div>
             <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+              {!inactive && (
+                <button style={{ ...sx.softBtn, flex: 1,
+                  background: C.peachBg, color: C.peachDeep, borderColor: C.peach }}
+                  onClick={() => recordPayment(s)}>
+                  <CheckCircle2 size={13} /> Record payment
+                </button>
+              )}
               <button style={{ ...sx.softBtn, flex: 1,
                 background: inactive ? C.mintBg : C.bg, color: inactive ? C.mintDeep : C.inkSoft,
                 borderColor: inactive ? C.mint : C.line }}
