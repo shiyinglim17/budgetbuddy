@@ -4,7 +4,8 @@ import {
   TrendingUp, AlertTriangle, CheckCircle2, Info, PiggyBank, Home,
   Plane, Hammer, ShieldCheck, ArrowRight, Pencil, X, GraduationCap,
   BookOpen, Coffee, Lightbulb, ChevronRight, Settings, Briefcase, Landmark,
-  RefreshCw, HandCoins, BellRing, CalendarClock, Download, Upload
+  RefreshCw, HandCoins, BellRing, CalendarClock, Download, Upload,
+  Search, ArrowUpDown, ArrowDownUp, ChevronDown, ChevronUp
 } from "lucide-react";
 import {
   PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis,
@@ -46,7 +47,6 @@ const CATEGORY_PALETTE = [
    ============================================================ */
 const STORE_KEY = "budgetbuddy:state:v1";
 
-// Standalone build: persists to the browser's localStorage.
 async function loadState() {
   try {
     const raw = localStorage.getItem(STORE_KEY);
@@ -806,10 +806,6 @@ function Dashboard({ state, update, goTo }) {
   const remaining = m.income - m.totalSpent;
   const spentPct = m.income > 0 ? Math.min(100, (m.totalSpent / m.income) * 100) : 0;
 
-  const pieData = state.envelopes
-    .filter((e) => e.spent > 0)
-    .map((e) => ({ name: e.name, value: e.spent, fill: CATEGORY_PALETTE[e.pal].dot }));
-
   const topFlags = m.insights.filter((i) => i.sev === "alert" || i.sev === "warn").slice(0, 3);
 
   return (
@@ -896,29 +892,127 @@ function Dashboard({ state, update, goTo }) {
         })}
       </div>
 
-      {/* Charts — pushed to bottom */}
-      <div style={sx.chartRow}>
-        <div style={{ ...sx.card, flex: 1, minWidth: 240 }}>
-          <h4 style={sx.cardH4}>Where money went</h4>
-          {pieData.length > 0 ? (
-            <ResponsiveContainer width="100%" height={190}>
-              <PieChart>
-                <Pie data={pieData} dataKey="value" nameKey="name" innerRadius={42} outerRadius={68}
-                  paddingAngle={2}>
-                  {pieData.map((d, i) => <Cell key={i} fill={d.fill} />)}
-                </Pie>
-                <Tooltip formatter={(v) => `$${Math.round(v)}`} contentStyle={sx.tooltip} />
-              </PieChart>
-            </ResponsiveContainer>
-          ) : <EmptyMini text="Log expenses to see your breakdown" />}
+      {/* Spending outlook — bottom of dashboard */}
+      <SpendingOutlook state={state} />
+    </div>
+  );
+}
+
+/* ============================================================
+   SPENDING OUTLOOK — daily/weekly/monthly with inflow/outflow, donut, envelope health
+   ============================================================ */
+function SpendingOutlook({ state }) {
+  const [period, setPeriod] = useState("monthly");
+
+  // Compute the start date for each period relative to today.
+  const now = new Date(); now.setHours(0, 0, 0, 0);
+  let startDate;
+  if (period === "daily") {
+    startDate = now;
+  } else if (period === "weekly") {
+    startDate = new Date(now);
+    startDate.setDate(startDate.getDate() - startDate.getDay()); // start of week (Sun)
+  } else {
+    startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+  }
+  const startISO = startDate.toISOString().slice(0, 10);
+
+  const txns = (state.transactions || []).filter((t) => (t.date || "") >= startISO);
+  const expenses = txns.filter((t) => (t.type || "expense") === "expense");
+  const inflows = txns.filter((t) => t.type === "inflow");
+  const totalOut = expenses.reduce((a, t) => a + t.amount, 0);
+  const totalIn = inflows.reduce((a, t) => a + t.amount, 0);
+
+  // Donut data from expenses in this period, grouped by envelope.
+  const envGroups = {};
+  expenses.forEach((t) => {
+    const name = state.envelopes.find((e) => e.id === t.envId)?.name || "Other";
+    const pal = state.envelopes.find((e) => e.id === t.envId);
+    const idx = pal ? pal.pal : 0;
+    if (!envGroups[name]) envGroups[name] = { name, value: 0, fill: CATEGORY_PALETTE[idx].dot };
+    envGroups[name].value += t.amount;
+  });
+  const pieData = Object.values(envGroups).filter((d) => d.value > 0)
+    .sort((a, b) => b.value - a.value);
+
+  // Envelope health for this period (spent in period vs budget).
+  // For weekly/daily, scale the monthly budget proportionally.
+  const budgetScale = period === "daily" ? 1 / 30 : period === "weekly" ? 7 / 30 : 1;
+
+  const periodLabel = period === "daily" ? "Today" : period === "weekly" ? "This week" : "This month";
+
+  return (
+    <div style={{ marginTop: 4 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+        <h4 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: C.ink }}>Spending outlook</h4>
+        <div style={{ display: "flex", gap: 4, background: C.bg, borderRadius: 9, padding: 3 }}>
+          {["daily", "weekly", "monthly"].map((p) => (
+            <button key={p} onClick={() => setPeriod(p)} style={{
+              ...sx.modeBtn,
+              background: period === p ? C.lavDeep : "transparent",
+              color: period === p ? "#fff" : C.inkSoft,
+              textTransform: "capitalize",
+            }}>{p}</button>
+          ))}
         </div>
+      </div>
+
+      {/* Inflow / Outflow summary */}
+      <div style={sx.statRow}>
+        <StatCard label={`${periodLabel} inflow`} value={totalIn} accent={C.mintDeep} bg={C.mintBg} icon={TrendingUp} />
+        <StatCard label={`${periodLabel} outflow`} value={totalOut} accent={C.peachDeep} bg={C.peachBg} icon={Wallet} />
+        <StatCard label="Net" value={totalIn - totalOut}
+          accent={totalIn - totalOut >= 0 ? C.skyDeep : C.roseDeep}
+          bg={totalIn - totalOut >= 0 ? C.skyBg : C.roseBg} icon={PiggyBank} />
+      </div>
+
+      <div style={sx.chartRow}>
+        {/* Donut: where money went this period */}
+        <div style={{ ...sx.card, flex: 1, minWidth: 240 }}>
+          <h4 style={sx.cardH4}>Where money went — {periodLabel.toLowerCase()}</h4>
+          {pieData.length > 0 ? (
+            <>
+              <ResponsiveContainer width="100%" height={180}>
+                <PieChart>
+                  <Pie data={pieData} dataKey="value" nameKey="name" innerRadius={42} outerRadius={68}
+                    paddingAngle={2}>
+                    {pieData.map((d, i) => <Cell key={i} fill={d.fill} />)}
+                  </Pie>
+                  <Tooltip formatter={(v) => `$${Math.round(v)}`} contentStyle={sx.tooltip} />
+                </PieChart>
+              </ResponsiveContainer>
+              <div style={{ marginTop: 6 }}>
+                {pieData.map((d, i) => (
+                  <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "3px 0", fontSize: 11.5 }}>
+                    <span style={{ display: "flex", alignItems: "center", gap: 5, color: C.inkSoft }}>
+                      <span style={{ width: 7, height: 7, borderRadius: 3, background: d.fill, display: "inline-block" }} />
+                      {d.name}
+                    </span>
+                    <span style={{ fontWeight: 700, color: C.ink }}>
+                      ${Math.round(d.value).toLocaleString()}
+                      <span style={{ fontWeight: 400, color: C.inkFaint, marginLeft: 4 }}>
+                        ({totalOut > 0 ? Math.round((d.value / totalOut) * 100) : 0}%)
+                      </span>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : <EmptyMini text={`No expenses logged ${periodLabel.toLowerCase()}`} />}
+        </div>
+
+        {/* Envelope health for this period */}
         <div style={{ ...sx.card, flex: 1.4, minWidth: 280 }}>
-          <h4 style={sx.cardH4}>Envelope health</h4>
+          <h4 style={sx.cardH4}>Envelope health — {periodLabel.toLowerCase()}</h4>
           {state.envelopes.filter((e) => e.budget > 0).length > 0 ? (
             <div>
               {state.envelopes.filter((e) => e.budget > 0).map((e) => {
-                const pctE = Math.min(100, (e.spent / e.budget) * 100);
-                const over = e.spent > e.budget;
+                // Sum expenses in this period for this envelope.
+                const periodSpent = expenses.filter((t) => t.envId === e.id)
+                  .reduce((a, t) => a + t.amount, 0);
+                const scaledBudget = Math.round(e.budget * budgetScale);
+                const pctE = scaledBudget > 0 ? Math.min(100, (periodSpent / scaledBudget) * 100) : 0;
+                const over = periodSpent > scaledBudget && scaledBudget > 0;
                 const pal = CATEGORY_PALETTE[e.pal];
                 return (
                   <div key={e.id} style={{ marginBottom: 10 }}>
@@ -929,8 +1023,9 @@ function Dashboard({ state, update, goTo }) {
                       </div>
                       <span style={{ fontSize: 10.5, fontWeight: 700,
                         color: over ? C.roseDeep : pctE > 85 ? C.butterDeep : C.inkFaint }}>
-                        {over ? `$${Math.round(e.spent - e.budget)} over` :
-                          `$${Math.round(e.budget - e.spent)} left`}
+                        ${Math.round(periodSpent)} / ${scaledBudget}
+                        {over ? ` · $${Math.round(periodSpent - scaledBudget)} over` :
+                          ` · $${Math.round(scaledBudget - periodSpent)} left`}
                       </span>
                     </div>
                     <div style={{ ...sx.track, height: 6, marginTop: 4 }}>
@@ -940,6 +1035,11 @@ function Dashboard({ state, update, goTo }) {
                   </div>
                 );
               })}
+              {period !== "monthly" && (
+                <p style={{ fontSize: 10, color: C.inkFaint, margin: "6px 0 0" }}>
+                  Budgets are scaled from your monthly amounts ({period === "daily" ? "÷30" : "×7/30"}).
+                </p>
+              )}
             </div>
           ) : <EmptyMini text="Set envelope budgets to track health" />}
         </div>
@@ -1382,24 +1482,35 @@ function AddEnvelopeForm({ onAdd, onCancel }) {
 
 /* ============================================================
    LEDGER — GRANULAR TRACKING (list/spreadsheet view)
+   Now supports: search, column sorting, inline editing, inflows
    ============================================================ */
 function Ledger({ state, update }) {
-  const [form, setForm] = useState({ desc: "", amount: "", envId: state.envelopes[0]?.id || "", date: today() });
+  const [form, setForm] = useState({
+    desc: "", amount: "", envId: state.envelopes[0]?.id || "",
+    date: todayISO(), type: "expense",
+  });
   const [filter, setFilter] = useState("all");
-
-  function today() { return new Date().toISOString().slice(0, 10); }
+  const [search, setSearch] = useState("");
+  const [sortCol, setSortCol] = useState("date");
+  const [sortDir, setSortDir] = useState("desc");
+  const [editingId, setEditingId] = useState(null);
+  const [editForm, setEditForm] = useState({});
 
   const addTxn = () => {
     if (!form.desc || !form.amount) return;
     const amt = Number(form.amount);
     if (amt <= 0) return;
+    const isInflow = form.type === "inflow";
+    const txn = {
+      id: "t" + Date.now(), desc: form.desc, amount: amt,
+      envId: isInflow ? "__inflow" : form.envId, date: form.date,
+      type: isInflow ? "inflow" : "expense",
+    };
     update((s) => ({
       ...s,
-      transactions: [
-        { id: "t" + Date.now(), desc: form.desc, amount: amt, envId: form.envId, date: form.date },
-        ...s.transactions,
-      ],
-      envelopes: s.envelopes.map((e) => e.id === form.envId ? { ...e, spent: e.spent + amt } : e),
+      transactions: [txn, ...s.transactions],
+      envelopes: isInflow ? s.envelopes : s.envelopes.map((e) =>
+        e.id === form.envId ? { ...e, spent: e.spent + amt } : e),
     }));
     setForm({ ...form, desc: "", amount: "" });
   };
@@ -1408,83 +1519,236 @@ function Ledger({ state, update }) {
     update((s) => ({
       ...s,
       transactions: s.transactions.filter((x) => x.id !== t.id),
-      envelopes: s.envelopes.map((e) => e.id === t.envId ? { ...e, spent: Math.max(0, e.spent - t.amount) } : e),
+      envelopes: t.type === "inflow" ? s.envelopes
+        : s.envelopes.map((e) => e.id === t.envId
+          ? { ...e, spent: Math.max(0, e.spent - t.amount) } : e),
     }));
   };
 
-  const envName = (id) => state.envelopes.find((e) => e.id === id)?.name || "—";
+  // Inline editing
+  const startEdit = (t) => {
+    setEditingId(t.id);
+    setEditForm({ desc: t.desc, amount: t.amount, envId: t.envId, date: t.date, type: t.type || "expense" });
+  };
+  const cancelEdit = () => { setEditingId(null); setEditForm({}); };
+  const saveEdit = (t) => {
+    const newAmt = Number(editForm.amount) || 0;
+    if (!editForm.desc || newAmt <= 0) return;
+    const oldIsExpense = (t.type || "expense") === "expense";
+    const newIsExpense = (editForm.type || "expense") === "expense";
+    update((s) => {
+      // First undo old envelope effect
+      let envs = oldIsExpense
+        ? s.envelopes.map((e) => e.id === t.envId ? { ...e, spent: Math.max(0, e.spent - t.amount) } : e)
+        : [...s.envelopes];
+      // Then apply new envelope effect
+      if (newIsExpense) {
+        const newEnvId = editForm.envId === "__inflow" ? (s.envelopes[0]?.id || "") : editForm.envId;
+        envs = envs.map((e) => e.id === newEnvId ? { ...e, spent: e.spent + newAmt } : e);
+      }
+      return {
+        ...s,
+        transactions: s.transactions.map((x) => x.id === t.id
+          ? { ...x, desc: editForm.desc, amount: newAmt,
+              envId: newIsExpense ? (editForm.envId === "__inflow" ? (s.envelopes[0]?.id || "") : editForm.envId) : "__inflow",
+              date: editForm.date, type: editForm.type || "expense" }
+          : x),
+        envelopes: envs,
+      };
+    });
+    setEditingId(null);
+    setEditForm({});
+  };
+
+  const envName = (id) => {
+    if (id === "__inflow") return "Inflow";
+    return state.envelopes.find((e) => e.id === id)?.name || "—";
+  };
   const envPal = (id) => {
+    if (id === "__inflow") return { dot: C.mintDeep, deep: C.mintDeep, bg: C.mintBg };
     const e = state.envelopes.find((x) => x.id === id);
     return e ? CATEGORY_PALETTE[e.pal] : CATEGORY_PALETTE[0];
   };
 
-  const filtered = filter === "all" ? state.transactions
-    : state.transactions.filter((t) => t.envId === filter);
-  const total = filtered.reduce((a, t) => a + t.amount, 0);
+  // Filter and search
+  let list = state.transactions || [];
+  if (filter === "inflow") list = list.filter((t) => t.type === "inflow");
+  else if (filter === "expense") list = list.filter((t) => (t.type || "expense") === "expense");
+  else if (filter !== "all") list = list.filter((t) => t.envId === filter);
+  if (search.trim()) {
+    const q = search.toLowerCase();
+    list = list.filter((t) => t.desc.toLowerCase().includes(q));
+  }
+
+  // Sort
+  const sorted = [...list].sort((a, b) => {
+    let cmp = 0;
+    if (sortCol === "date") cmp = (a.date || "").localeCompare(b.date || "");
+    else if (sortCol === "desc") cmp = a.desc.localeCompare(b.desc);
+    else if (sortCol === "amount") cmp = a.amount - b.amount;
+    else if (sortCol === "env") cmp = envName(a.envId).localeCompare(envName(b.envId));
+    return sortDir === "asc" ? cmp : -cmp;
+  });
+
+  const toggleSort = (col) => {
+    if (sortCol === col) setSortDir((d) => d === "asc" ? "desc" : "asc");
+    else { setSortCol(col); setSortDir("asc"); }
+  };
+
+  const totalExpense = sorted.filter((t) => (t.type || "expense") === "expense").reduce((a, t) => a + t.amount, 0);
+  const totalInflow = sorted.filter((t) => t.type === "inflow").reduce((a, t) => a + t.amount, 0);
+
+  const SortIcon = ({ col }) => {
+    if (sortCol !== col) return <ArrowUpDown size={10} color={C.inkFaint} style={{ marginLeft: 3 }} />;
+    return sortDir === "asc"
+      ? <ChevronUp size={10} color={C.lavDeep} style={{ marginLeft: 3 }} />
+      : <ChevronDown size={10} color={C.lavDeep} style={{ marginLeft: 3 }} />;
+  };
 
   return (
     <div>
       <SectionTitle icon={ListChecks} title="Expense ledger"
-        subtitle="Log every transaction — the granular truth of your spending" />
+        subtitle="Log every transaction — expenses and inflows alike" />
 
       {/* Quick add */}
       <div style={sx.card}>
-        <h4 style={sx.cardH4}>Log an expense</h4>
+        <div style={{ display: "flex", gap: 5, marginBottom: 10 }}>
+          {[["expense", "Expense", C.peachDeep, C.peachBg], ["inflow", "Inflow", C.mintDeep, C.mintBg]].map(([k, l, c, bg]) => (
+            <button key={k} onClick={() => setForm({ ...form, type: k })} style={{
+              ...sx.chip, flex: 1,
+              background: form.type === k ? c : bg,
+              color: form.type === k ? "#fff" : c,
+            }}>{l}</button>
+          ))}
+        </div>
         <div style={sx.ledgerForm}>
-          <input style={{ ...sx.input, flex: 2, minWidth: 130 }} placeholder="What did you buy?"
+          <input style={{ ...sx.input, flex: 2, minWidth: 130 }}
+            placeholder={form.type === "inflow" ? "Source (e.g. Parents, freelance)" : "What did you buy?"}
             value={form.desc} onChange={(e) => setForm({ ...form, desc: e.target.value })} />
           <input style={{ ...sx.input, flex: 1, minWidth: 90 }} type="number" placeholder="$ amount"
             value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} />
         </div>
         <div style={{ ...sx.ledgerForm, marginTop: 8 }}>
-          <select style={{ ...sx.input, flex: 2, minWidth: 130 }} value={form.envId}
-            onChange={(e) => setForm({ ...form, envId: e.target.value })}>
-            {state.envelopes.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
-          </select>
+          {form.type === "expense" ? (
+            <select style={{ ...sx.input, flex: 2, minWidth: 130 }} value={form.envId}
+              onChange={(e) => setForm({ ...form, envId: e.target.value })}>
+              {state.envelopes.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+            </select>
+          ) : (
+            <div style={{ ...sx.input, flex: 2, minWidth: 130, background: C.mintBg, color: C.mintDeep,
+              fontWeight: 700, display: "flex", alignItems: "center", gap: 5, border: `1px solid ${C.mint}` }}>
+              <TrendingUp size={13} /> Inflow — adds to available money
+            </div>
+          )}
           <input style={{ ...sx.input, flex: 1, minWidth: 90 }} type="date" value={form.date}
             onChange={(e) => setForm({ ...form, date: e.target.value })} />
         </div>
         <button style={{ ...sx.primaryBtn, marginTop: 10, width: "100%",
+          background: form.type === "inflow" ? C.mintDeep : C.lavDeep,
           opacity: form.desc && form.amount ? 1 : 0.5 }}
           disabled={!form.desc || !form.amount} onClick={addTxn}>
-          <Plus size={15} /> Add to ledger
+          <Plus size={15} /> {form.type === "inflow" ? "Record inflow" : "Add to ledger"}
         </button>
       </div>
 
-      {/* Filter + total */}
-      <div style={{ display: "flex", gap: 8, alignItems: "center", margin: "4px 2px 12px", flexWrap: "wrap" }}>
-        <select style={{ ...sx.miniSelect }} value={filter} onChange={(e) => setFilter(e.target.value)}>
-          <option value="all">All envelopes</option>
+      {/* Search + filter + totals */}
+      <div style={{ display: "flex", gap: 8, alignItems: "center", margin: "4px 2px 6px", flexWrap: "wrap" }}>
+        <div style={{ position: "relative", flex: 1, minWidth: 130 }}>
+          <Search size={13} color={C.inkFaint} style={{ position: "absolute", left: 10, top: 10 }} />
+          <input style={{ ...sx.input, paddingLeft: 30, marginBottom: 0 }}
+            placeholder="Search transactions…" value={search}
+            onChange={(e) => setSearch(e.target.value)} />
+        </div>
+        <select style={sx.miniSelect} value={filter} onChange={(e) => setFilter(e.target.value)}>
+          <option value="all">All</option>
+          <option value="expense">Expenses only</option>
+          <option value="inflow">Inflows only</option>
           {state.envelopes.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
         </select>
-        <span style={{ fontSize: 12, color: C.inkSoft, marginLeft: "auto" }}>
-          {filtered.length} item{filtered.length !== 1 ? "s" : ""} · <strong style={{ color: C.ink }}>
-            ${Math.round(total).toLocaleString()}</strong>
-        </span>
+      </div>
+      <div style={{ display: "flex", gap: 14, margin: "0 2px 12px", fontSize: 12, color: C.inkSoft }}>
+        <span>{sorted.length} item{sorted.length !== 1 ? "s" : ""}</span>
+        <span>Out: <strong style={{ color: C.peachDeep }}>${Math.round(totalExpense).toLocaleString()}</strong></span>
+        <span>In: <strong style={{ color: C.mintDeep }}>${Math.round(totalInflow).toLocaleString()}</strong></span>
+        <span>Net: <strong style={{ color: totalInflow - totalExpense >= 0 ? C.mintDeep : C.roseDeep }}>
+          ${Math.round(totalInflow - totalExpense).toLocaleString()}</strong></span>
       </div>
 
       {/* Spreadsheet list */}
       <div style={sx.card}>
-        {filtered.length === 0 ? (
+        {sorted.length === 0 ? (
           <div style={{ textAlign: "center", padding: "30px 10px", color: C.inkFaint }}>
             <Coffee size={26} color={C.inkFaint} />
-            <p style={{ fontSize: 12.5, marginTop: 8 }}>No expenses logged yet. Even that morning kopi counts!</p>
+            <p style={{ fontSize: 12.5, marginTop: 8 }}>
+              {search ? "No transactions match your search." : "No transactions yet. Even that morning kopi counts!"}
+            </p>
           </div>
         ) : (
           <div style={{ overflowX: "auto" }}>
             <table style={sx.table}>
               <thead>
                 <tr>
-                  <th style={sx.th}>Date</th>
-                  <th style={sx.th}>Description</th>
-                  <th style={sx.th}>Envelope</th>
-                  <th style={{ ...sx.th, textAlign: "right" }}>Amount</th>
+                  <th style={{ ...sx.th, cursor: "pointer" }} onClick={() => toggleSort("date")}>
+                    Date <SortIcon col="date" />
+                  </th>
+                  <th style={{ ...sx.th, cursor: "pointer" }} onClick={() => toggleSort("desc")}>
+                    Description <SortIcon col="desc" />
+                  </th>
+                  <th style={{ ...sx.th, cursor: "pointer" }} onClick={() => toggleSort("env")}>
+                    Envelope <SortIcon col="env" />
+                  </th>
+                  <th style={{ ...sx.th, textAlign: "right", cursor: "pointer" }} onClick={() => toggleSort("amount")}>
+                    Amount <SortIcon col="amount" />
+                  </th>
                   <th style={sx.th}></th>
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((t) => {
+                {sorted.map((t) => {
                   const pal = envPal(t.envId);
+                  const isInflow = t.type === "inflow";
+                  const isEditing = editingId === t.id;
+
+                  if (isEditing) {
+                    return (
+                      <tr key={t.id} style={{ background: C.lavBg }}>
+                        <td style={sx.td}>
+                          <input style={{ ...sx.miniInput, width: 100, textAlign: "left" }} type="date"
+                            value={editForm.date} onChange={(e) => setEditForm({ ...editForm, date: e.target.value })} />
+                        </td>
+                        <td style={sx.td}>
+                          <input style={{ ...sx.miniInput, width: "100%", textAlign: "left" }}
+                            value={editForm.desc} onChange={(e) => setEditForm({ ...editForm, desc: e.target.value })} />
+                        </td>
+                        <td style={sx.td}>
+                          <select style={{ ...sx.miniInput, width: 100, textAlign: "left" }}
+                            value={editForm.type === "inflow" ? "__inflow" : editForm.envId}
+                            onChange={(e) => {
+                              if (e.target.value === "__inflow") setEditForm({ ...editForm, type: "inflow", envId: "__inflow" });
+                              else setEditForm({ ...editForm, type: "expense", envId: e.target.value });
+                            }}>
+                            <option value="__inflow">Inflow</option>
+                            {state.envelopes.map((ev) => <option key={ev.id} value={ev.id}>{ev.name}</option>)}
+                          </select>
+                        </td>
+                        <td style={{ ...sx.td, textAlign: "right" }}>
+                          <input style={{ ...sx.miniInput, width: 70 }} type="number"
+                            value={editForm.amount} onChange={(e) => setEditForm({ ...editForm, amount: e.target.value })} />
+                        </td>
+                        <td style={{ ...sx.td, textAlign: "right" }}>
+                          <div style={{ display: "flex", gap: 3 }}>
+                            <button style={sx.miniIconBtn} onClick={() => saveEdit(t)} aria-label="Save">
+                              <CheckCircle2 size={14} color={C.mintDeep} />
+                            </button>
+                            <button style={sx.miniIconBtn} onClick={cancelEdit} aria-label="Cancel">
+                              <X size={14} color={C.inkFaint} />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  }
+
                   return (
                     <tr key={t.id}>
                       <td style={sx.td}>{fmtDate(t.date)}</td>
@@ -1495,13 +1759,19 @@ function Ledger({ state, update }) {
                           <span style={{ fontSize: 11.5 }}>{envName(t.envId)}</span>
                         </span>
                       </td>
-                      <td style={{ ...sx.td, textAlign: "right", fontWeight: 700, color: C.ink }}>
-                        ${t.amount.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                      <td style={{ ...sx.td, textAlign: "right", fontWeight: 700,
+                        color: isInflow ? C.mintDeep : C.ink }}>
+                        {isInflow ? "+" : "-"}${t.amount.toLocaleString(undefined, { minimumFractionDigits: 2 })}
                       </td>
                       <td style={{ ...sx.td, textAlign: "right" }}>
-                        <button style={sx.miniIconBtn} onClick={() => delTxn(t)} aria-label="Delete">
-                          <Trash2 size={13} color={C.inkFaint} />
-                        </button>
+                        <div style={{ display: "flex", gap: 2 }}>
+                          <button style={sx.miniIconBtn} onClick={() => startEdit(t)} aria-label="Edit">
+                            <Pencil size={12} color={C.inkFaint} />
+                          </button>
+                          <button style={sx.miniIconBtn} onClick={() => delTxn(t)} aria-label="Delete">
+                            <Trash2 size={12} color={C.inkFaint} />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );
