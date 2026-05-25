@@ -162,6 +162,74 @@ export default function App() {
     return () => clearTimeout(t);
   }, [state, loading]);
 
+  // Auto-record subscription payments when billing dates have passed.
+  // Runs once after load and whenever subscriptions change. Uses deterministic
+  // transaction IDs (sub ID + date) to prevent double-recording.
+  useEffect(() => {
+    if (!state || loading || !state.onboarded) return;
+    const subs = state.subscriptions || [];
+    const activeSubs = subs.filter((s) => s.active !== false && s.nextRenew);
+    if (activeSubs.length === 0) return;
+
+    const subsEnv = state.envelopes.find((e) =>
+      e.name.toLowerCase().includes("subscription") || e.name.toLowerCase().includes("bills"));
+    const fallbackEnvId = subsEnv ? subsEnv.id : (state.envelopes[0]?.id || "");
+    const existingTxnIds = new Set((state.transactions || []).map((t) => t.id));
+    const todayStr = todayISO();
+
+    let newTxns = [];
+    let envSpendDeltas = {}; // envId -> amount to add
+    let subUpdates = {}; // subId -> new nextRenew
+
+    activeSubs.forEach((sub) => {
+      let renewDate = sub.nextRenew;
+      const cycleKey = sub.cycle === "yearly" ? "monthly" : sub.cycle; // yearly subs billed once, advance by cycle
+      const advanceKey = sub.cycle; // use actual cycle for advancing
+      let guard = 0;
+
+      // Walk forward through each missed billing date.
+      while (daysUntil(renewDate) <= 0 && guard < 60) {
+        // Deterministic ID: prevents re-recording if app re-opens on the same day.
+        const txnId = `autosub_${sub.id}_${renewDate}`;
+        if (!existingTxnIds.has(txnId)) {
+          newTxns.push({
+            id: txnId,
+            desc: `${sub.name} (auto-recorded)`,
+            amount: sub.cost,
+            envId: fallbackEnvId,
+            date: renewDate,
+            type: "expense",
+          });
+          existingTxnIds.add(txnId);
+          envSpendDeltas[fallbackEnvId] = (envSpendDeltas[fallbackEnvId] || 0) + sub.cost;
+        }
+        // Advance to next billing date.
+        renewDate = advanceDate(renewDate, advanceKey === "yearly" ? "monthly" : advanceKey);
+        // For yearly subs, jump 12 months.
+        if (advanceKey === "yearly") {
+          const d = new Date(renewDate);
+          d.setMonth(d.getMonth() + 11); // already advanced 1 month, add 11 more
+          renewDate = d.toISOString().slice(0, 10);
+        }
+        guard++;
+      }
+      if (renewDate !== sub.nextRenew) {
+        subUpdates[sub.id] = renewDate;
+      }
+    });
+
+    if (newTxns.length === 0 && Object.keys(subUpdates).length === 0) return;
+
+    update((s) => ({
+      ...s,
+      transactions: [...newTxns.reverse(), ...s.transactions],
+      envelopes: s.envelopes.map((e) =>
+        envSpendDeltas[e.id] ? { ...e, spent: e.spent + envSpendDeltas[e.id] } : e),
+      subscriptions: s.subscriptions.map((sub) =>
+        subUpdates[sub.id] ? { ...sub, nextRenew: subUpdates[sub.id] } : sub),
+    }));
+  }, [state?.subscriptions?.length, loading]); // re-check when subs are added/removed
+
   const update = useCallback((fn) => {
     setState((prev) => {
       const next = typeof fn === "function" ? fn(prev) : fn;
@@ -2224,28 +2292,6 @@ function Subscriptions({ state, update }) {
   }));
   const del = (id) => update((st) => ({ ...st, subscriptions: st.subscriptions.filter((s) => s.id !== id) }));
 
-  // Record a subscription payment: adds ledger txn + updates envelope spent + advances renewal date.
-  const recordPayment = (sub) => {
-    const envId = subsEnvelope ? subsEnvelope.id : (state.envelopes[0]?.id || "");
-    update((st) => ({
-      ...st,
-      transactions: [
-        {
-          id: "t" + Date.now(),
-          desc: `${sub.name} (subscription)`,
-          amount: sub.cost,
-          envId,
-          date: new Date().toISOString().slice(0, 10),
-        },
-        ...st.transactions,
-      ],
-      envelopes: st.envelopes.map((e) =>
-        e.id === envId ? { ...e, spent: e.spent + sub.cost } : e),
-      subscriptions: st.subscriptions.map((s) =>
-        s.id === sub.id ? { ...s, nextRenew: advanceDate(sub.nextRenew || todayISO(), sub.cycle === "yearly" ? "monthly" : sub.cycle) } : s),
-    }));
-  };
-
   // Push the computed monthly total into the subscriptions envelope budget.
   const syncToEnvelope = () => {
     if (!subsEnvelope) return;
@@ -2271,6 +2317,12 @@ function Subscriptions({ state, update }) {
         <span><strong>Subscription creep is real:</strong> small monthly charges feel harmless but
           ${Math.round(monthlyTotal)}/month is ${Math.round(monthlyTotal * 12)}/year. Review anything
           you haven't used in the last 30 days.</span>
+      </div>
+
+      <div style={sx.eduStrip}>
+        <CheckCircle2 size={14} color={C.mintDeep} />
+        <span><strong>Payments auto-record:</strong> on each billing date, a ledger transaction is created
+          automatically under your Bills &amp; Subscriptions envelope. Pause a subscription to stop this.</span>
       </div>
 
       {subsEnvelope && subs.length > 0 && (
@@ -2329,13 +2381,6 @@ function Subscriptions({ state, update }) {
               </span>
             </div>
             <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-              {!inactive && (
-                <button style={{ ...sx.softBtn, flex: 1,
-                  background: C.peachBg, color: C.peachDeep, borderColor: C.peach }}
-                  onClick={() => recordPayment(s)}>
-                  <CheckCircle2 size={13} /> Record payment
-                </button>
-              )}
               <button style={{ ...sx.softBtn, flex: 1,
                 background: inactive ? C.mintBg : C.bg, color: inactive ? C.mintDeep : C.inkSoft,
                 borderColor: inactive ? C.mint : C.line }}
