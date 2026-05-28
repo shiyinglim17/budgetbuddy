@@ -51,18 +51,14 @@ async function loadState() {
   try {
     const raw = localStorage.getItem(STORE_KEY);
     if (raw) return JSON.parse(raw);
-  } catch (e) {
-    console.error("Load failed:", e);
-  }
+  } catch (e) { console.error("Load failed:", e); }
   return null;
 }
 
 async function saveState(state) {
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify(state));
-  } catch (e) {
-    console.error("Save failed:", e);
-  }
+  } catch (e) { console.error("Save failed:", e); }
 }
 
 /* ============================================================
@@ -137,6 +133,8 @@ const DEFAULT_STATE = {
   reminders: [],
   // Recurring subscriptions with renewal/deduction dates.
   subscriptions: [],
+  // Free-form personal notes on the Goals page.
+  goalNotes: "",
 };
 
 /* ============================================================
@@ -161,6 +159,29 @@ export default function App() {
     const t = setTimeout(() => saveState(state), 400);
     return () => clearTimeout(t);
   }, [state, loading]);
+
+  // Seed pre-configured reminders (only once, uses deterministic IDs).
+  useEffect(() => {
+    if (!state || loading || !state.onboarded) return;
+    const existing = new Set((state.reminders || []).map((r) => r.id));
+    const seeds = [];
+    if (!existing.has("seed_chatgpt")) {
+      seeds.push({
+        id: "seed_chatgpt", who: "Hall ppl (6)", purpose: "ChatGPT Plus",
+        amount: 24.60, dueDate: "2026-06-15", frequency: "monthly",
+        endDate: "", settled: false,
+      });
+    }
+    if (!existing.has("seed_spotify")) {
+      seeds.push({
+        id: "seed_spotify", who: "Spotify family (5)", purpose: "Spotify family plan",
+        amount: 215.70, dueDate: "2026-09-01", frequency: "yearly",
+        endDate: "", settled: false,
+      });
+    }
+    if (seeds.length === 0) return;
+    update((s) => ({ ...s, reminders: [...seeds, ...(s.reminders || [])] }));
+  }, [state?.onboarded, loading]);
 
   // Auto-record subscription payments when billing dates have passed.
   // Runs once after load and whenever subscriptions change. Uses deterministic
@@ -763,12 +784,15 @@ function BackupSection({ state, update, close }) {
    INSIGHT ENGINE — shared by Dashboard & Coach
    Generates personalised flags & suggestions
    ============================================================ */
-function buildInsights(state) {
+function buildInsights(state, monthStr) {
+  const targetMonth = monthStr || currentMonthStr();
   const cpf = cpfBreakdown(state.profile.grossSalary);
   const income = cpf.takeHome + (state.profile.monthlyIncomeOther || 0);
-  const env = state.envelopes;
+  const monthSpent = computeEnvelopeSpent(state.transactions, targetMonth);
+  const env = state.envelopes.map((e) => ({ ...e, spent: monthSpent[e.id] || 0 }));
   const totalBudget = env.reduce((a, e) => a + e.budget, 0);
   const totalSpent = env.reduce((a, e) => a + e.spent, 0);
+  const monthInflows = computeMonthInflows(state.transactions, targetMonth);
   const needs = env.filter((e) => e.type === "need");
   const wants = env.filter((e) => e.type === "want");
   const saves = env.filter((e) => e.type === "save");
@@ -861,32 +885,129 @@ function buildInsights(state) {
     });
   }
 
-  return { cpf, income, totalBudget, totalSpent, needSpent, wantSpent, saveBudget, insights };
+  return { cpf, income, totalBudget, totalSpent, needSpent, wantSpent, saveBudget, insights, monthInflows, envelopes: env };
 }
 
 const monthName = () => new Date().toLocaleString("en-SG", { month: "long", year: "numeric" });
+
+// Derive envelope "spent" from transactions for a given month (YYYY-MM).
+// This is the single source of truth — replaces stale accumulator logic.
+function computeEnvelopeSpent(transactions, monthStr) {
+  const spent = {};
+  (transactions || []).forEach((t) => {
+    if ((t.type || "expense") !== "expense") return;
+    if (!(t.date || "").startsWith(monthStr)) return;
+    spent[t.envId] = (spent[t.envId] || 0) + t.amount;
+  });
+  return spent;
+}
+
+function currentMonthStr() {
+  const n = new Date();
+  return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}`;
+}
+
+// Compute total inflows for a given month.
+function computeMonthInflows(transactions, monthStr) {
+  return (transactions || []).filter((t) =>
+    t.type === "inflow" && (t.date || "").startsWith(monthStr)
+  ).reduce((a, t) => a + t.amount, 0);
+}
+
+// List of unique months that have transactions, newest first.
+function transactionMonths(transactions) {
+  const months = new Set();
+  (transactions || []).forEach((t) => {
+    if (t.date) months.add(t.date.slice(0, 7));
+  });
+  return Array.from(months).sort().reverse();
+}
+
+// For the dashboard month selector: all months with data + current month, newest first.
+function dashboardMonths(transactions) {
+  const months = new Set();
+  months.add(currentMonthStr());
+  (transactions || []).forEach((t) => {
+    if (t.date) months.add(t.date.slice(0, 7));
+  });
+  return Array.from(months).sort().reverse();
+}
+
+// Format "2026-05" to "May 26"
+function fmtMonthShort(monthStr) {
+  const [y, m] = monthStr.split("-");
+  const d = new Date(Number(y), Number(m) - 1, 1);
+  return d.toLocaleString("en-SG", { month: "short" }) + " " + y.slice(2);
+}
+
+// Format "2026-05" to "May 2026"
+function fmtMonthLong(monthStr) {
+  const [y, m] = monthStr.split("-");
+  const d = new Date(Number(y), Number(m) - 1, 1);
+  return d.toLocaleString("en-SG", { month: "long", year: "numeric" });
+}
 
 /* ============================================================
    DASHBOARD — MACRO VIEW
    ============================================================ */
 function Dashboard({ state, update, goTo }) {
-  const m = useMemo(() => buildInsights(state), [state]);
-  const remaining = m.income - m.totalSpent;
+  const [selectedMonth, setSelectedMonth] = useState(currentMonthStr());
+  const months = useMemo(() => dashboardMonths(state.transactions), [state.transactions]);
+  const isCurrentMonth = selectedMonth === currentMonthStr();
+
+  const m = useMemo(() => buildInsights(state, selectedMonth), [state, selectedMonth]);
+  const remaining = m.income - m.totalSpent + m.monthInflows;
   const spentPct = m.income > 0 ? Math.min(100, (m.totalSpent / m.income) * 100) : 0;
 
-  const topFlags = m.insights.filter((i) => i.sev === "alert" || i.sev === "warn").slice(0, 3);
+  // Dynamic savings account balance = recorded savings + all inflows - all expenses (from all time)
+  const allExpenses = (state.transactions || []).filter((t) => (t.type || "expense") === "expense")
+    .reduce((a, t) => a + t.amount, 0);
+  const allInflows = (state.transactions || []).filter((t) => t.type === "inflow")
+    .reduce((a, t) => a + t.amount, 0);
+  const savingsAsset = (state.assets || []).find((a) => a.type === "savings");
+  const baseSavings = savingsAsset ? savingsAsset.amount : (state.profile.currentSavings || 0);
+  const dynamicSavings = baseSavings + allInflows - allExpenses;
+
+  const totalAssets = (state.assets || []).reduce((a, x) => a + x.amount, 0);
+  const dynamicNetWorth = totalAssets + allInflows - allExpenses;
+
+  const topFlags = m.insights.filter((i) => i.sev === "alert" || i.sev === "warn").slice(0, 4);
 
   return (
     <div>
-      <SectionTitle icon={LayoutDashboard} title={`${monthName()} overview`}
-        subtitle="Your money at a glance" />
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14 }}>
+        <div>
+          <h2 style={{ margin: 0, fontSize: 18, color: C.ink, display: "flex", alignItems: "center", gap: 8 }}>
+            <LayoutDashboard size={19} color={C.lavDeep} /> {fmtMonthLong(selectedMonth)} overview
+          </h2>
+          <p style={{ margin: "2px 0 0 27px", fontSize: 12.5, color: C.inkSoft }}>
+            {isCurrentMonth ? "Your money at a glance" : "Historical snapshot"}
+          </p>
+        </div>
+        <select
+          style={{
+            ...sx.miniSelect, fontWeight: 700, fontSize: 12.5, padding: "8px 12px",
+            borderRadius: 10, minWidth: 90, color: C.lavDeep, background: C.lavBg,
+            border: `1px solid ${C.lav}`,
+          }}
+          value={selectedMonth}
+          onChange={(e) => setSelectedMonth(e.target.value)}
+        >
+          {months.map((mo) => (
+            <option key={mo} value={mo}>
+              {fmtMonthShort(mo)}{mo === currentMonthStr() ? " ●" : ""}
+            </option>
+          ))}
+        </select>
+      </div>
 
-      {/* Hero stats */}
+      {/* Hero stats — income, spent, inflows */}
       <div style={sx.statRow}>
         <StatCard label="Take-home income" value={m.income} accent={C.mintDeep} bg={C.mintBg} icon={Wallet} />
-        <StatCard label="Spent so far" value={m.totalSpent} accent={C.peachDeep} bg={C.peachBg} icon={TrendingUp} />
-        <StatCard label="Still available" value={remaining} accent={remaining >= 0 ? C.skyDeep : C.roseDeep}
-          bg={remaining >= 0 ? C.skyBg : C.roseBg} icon={PiggyBank} />
+        <StatCard label={`Spent ${isCurrentMonth ? "this month" : fmtMonthShort(selectedMonth)}`}
+          value={m.totalSpent} accent={C.peachDeep} bg={C.peachBg} icon={TrendingUp} />
+        <StatCard label={`Inflows ${isCurrentMonth ? "this month" : fmtMonthShort(selectedMonth)}`}
+          value={m.monthInflows} accent={C.skyDeep} bg={C.skyBg} icon={TrendingUp} />
       </div>
 
       {/* Spend progress bar */}
@@ -910,7 +1031,62 @@ function Dashboard({ state, update, goTo }) {
         </p>
       </div>
 
-      {/* Flags */}
+      {/* ENVELOPE HEALTH — priority section */}
+      <div style={sx.card}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+          <h4 style={{ ...sx.cardH4, margin: 0 }}>
+            <Wallet size={14} color={C.lavDeep} style={{ verticalAlign: -2, marginRight: 5 }} />
+            Envelope health — {isCurrentMonth ? "this month" : fmtMonthShort(selectedMonth)}
+          </h4>
+          <button style={sx.linkBtn} onClick={() => goTo("envelopes")}>
+            Edit envelopes <ChevronRight size={13} />
+          </button>
+        </div>
+        {m.envelopes.filter((e) => e.budget > 0).length > 0 ? (
+          <div>
+            {m.envelopes.filter((e) => e.budget > 0).map((e) => {
+              const pctE = Math.min(100, (e.spent / e.budget) * 100);
+              const over = e.spent > e.budget;
+              const pal = CATEGORY_PALETTE[e.pal];
+              const left = e.budget - e.spent;
+              return (
+                <div key={e.id} style={{ marginBottom: 12 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, fontWeight: 700, color: C.ink }}>
+                      <span style={{ width: 8, height: 8, borderRadius: 4, background: pal.dot, display: "inline-block" }} />
+                      {e.name}
+                    </div>
+                    <span style={{ fontSize: 11, fontWeight: 800,
+                      color: over ? C.roseDeep : pctE > 85 ? C.butterDeep : C.mintDeep }}>
+                      {over ? `$${Math.round(e.spent - e.budget)} over budget` :
+                        `$${Math.round(left)} left`}
+                    </span>
+                  </div>
+                  <div style={{ ...sx.track, height: 7, marginTop: 5 }}>
+                    <div style={{ ...sx.fill, width: `${pctE}%`,
+                      background: over ? C.roseDeep : pctE > 85 ? C.butterDeep : pal.deep }} />
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 3 }}>
+                    <span style={{ fontSize: 10, color: C.inkFaint }}>
+                      ${Math.round(e.spent)} spent
+                    </span>
+                    <span style={{ fontSize: 10, color: C.inkFaint }}>
+                      ${Math.round(e.budget)} budget
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <p style={{ fontSize: 12, color: C.inkFaint }}>Set envelope budgets in the Envelopes tab to see health here.</p>
+        )}
+      </div>
+
+      {/* Spending outlook (daily/weekly/monthly) */}
+      <SpendingOutlook state={state} selectedMonth={selectedMonth} />
+
+      {/* What needs your attention */}
       <div style={sx.card}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
           <h4 style={{ ...sx.cardH4, margin: 0 }}>
@@ -931,16 +1107,13 @@ function Dashboard({ state, update, goTo }) {
       {/* Upcoming: reminders + renewals */}
       <UpcomingCard state={state} goTo={goTo} />
 
-      {/* Net worth */}
-      <NetWorthCard state={state} update={update} />
-
-      {/* Goal snapshot */}
+      {/* Goal progress */}
       <div style={sx.card}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
           <h4 style={{ ...sx.cardH4, margin: 0 }}>Goal progress</h4>
           <button style={sx.linkBtn} onClick={() => goTo("goals")}>All goals <ChevronRight size={13} /></button>
         </div>
-        {state.goals.slice(0, 3).map((g) => {
+        {state.goals.slice(0, 4).map((g) => {
           const pct = g.target > 0 ? Math.min(100, (g.saved / g.target) * 100) : 0;
           return (
             <div key={g.id} style={{ marginBottom: 12 }}>
@@ -960,8 +1133,34 @@ function Dashboard({ state, update, goTo }) {
         })}
       </div>
 
-      {/* Spending outlook — bottom of dashboard */}
-      <SpendingOutlook state={state} />
+      {/* Net worth — dynamic */}
+      <div style={sx.card}>
+        <h4 style={sx.cardH4}>
+          <Landmark size={14} color={C.lavDeep} style={{ verticalAlign: -2, marginRight: 5 }} />
+          Financial snapshot
+        </h4>
+        <div style={sx.statRow}>
+          <div style={{ ...sx.statCard, background: C.lavBg, flex: 1 }}>
+            <div style={{ fontSize: 10.5, color: C.inkSoft, fontWeight: 600 }}>Est. net worth</div>
+            <div style={{ fontSize: 20, fontWeight: 800, color: C.lavDeep, marginTop: 4 }}>
+              ${Math.round(dynamicNetWorth).toLocaleString()}
+            </div>
+          </div>
+          <div style={{ ...sx.statCard, background: C.mintBg, flex: 1 }}>
+            <div style={{ fontSize: 10.5, color: C.inkSoft, fontWeight: 600 }}>Savings account</div>
+            <div style={{ fontSize: 20, fontWeight: 800, color: dynamicSavings >= 0 ? C.mintDeep : C.roseDeep, marginTop: 4 }}>
+              ${Math.round(dynamicSavings).toLocaleString()}
+            </div>
+          </div>
+        </div>
+        <p style={{ fontSize: 10, color: C.inkFaint, margin: "4px 0 0" }}>
+          Adjusted from your recorded assets plus all tracked inflows minus all expenses.
+          <button style={{ ...sx.linkBtn, display: "inline", marginLeft: 4, fontSize: 10 }}
+            onClick={() => goTo("dashboard")}>
+            Update base assets in Settings
+          </button>
+        </p>
+      </div>
     </div>
   );
 }
@@ -969,66 +1168,102 @@ function Dashboard({ state, update, goTo }) {
 /* ============================================================
    SPENDING OUTLOOK — daily/weekly/monthly with inflow/outflow, donut, envelope health
    ============================================================ */
-function SpendingOutlook({ state }) {
+function SpendingOutlook({ state, selectedMonth }) {
+  const viewingMonth = selectedMonth || currentMonthStr();
+  const isCurrentMonth = viewingMonth === currentMonthStr();
   const [period, setPeriod] = useState("monthly");
 
-  // Compute the start date for each period relative to today.
+  // For past months, force monthly view (daily/weekly are meaningless).
+  const effectivePeriod = isCurrentMonth ? period : "monthly";
+
+  // Parse the target month into year/month.
+  const [targetY, targetM] = viewingMonth.split("-").map(Number);
+
+  // Compute date range [startISO, endISO] for the selected granularity.
   const now = new Date(); now.setHours(0, 0, 0, 0);
-  let startDate;
-  if (period === "daily") {
-    startDate = now;
-  } else if (period === "weekly") {
+  let startDate, endDate;
+  if (effectivePeriod === "daily" && isCurrentMonth) {
     startDate = new Date(now);
-    startDate.setDate(startDate.getDate() - startDate.getDay()); // start of week (Sun)
+    endDate = new Date(now);
+  } else if (effectivePeriod === "weekly" && isCurrentMonth) {
+    startDate = new Date(now);
+    const dayOfWeek = startDate.getDay(); // 0=Sun
+    const diff = dayOfWeek === 0 ? 6 : dayOfWeek - 1; // shift so Mon=0
+    startDate.setDate(startDate.getDate() - diff);
+    endDate = new Date(startDate);
+    endDate.setDate(endDate.getDate() + 6);
   } else {
-    startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+    // Monthly — use the target month.
+    startDate = new Date(targetY, targetM - 1, 1);
+    endDate = new Date(targetY, targetM, 0); // last day of that month
   }
   const startISO = startDate.toISOString().slice(0, 10);
+  const endISO = endDate.toISOString().slice(0, 10);
 
-  const txns = (state.transactions || []).filter((t) => (t.date || "") >= startISO);
+  // Filter transactions strictly within the date range.
+  const txns = (state.transactions || []).filter((t) => {
+    const d = t.date || "";
+    return d >= startISO && d <= endISO;
+  });
   const expenses = txns.filter((t) => (t.type || "expense") === "expense");
   const inflows = txns.filter((t) => t.type === "inflow");
   const totalOut = expenses.reduce((a, t) => a + t.amount, 0);
   const totalIn = inflows.reduce((a, t) => a + t.amount, 0);
 
+  // How many days does this period span? Used for budget scaling.
+  const daysInTargetMonth = new Date(targetY, targetM, 0).getDate();
+  const periodDays = effectivePeriod === "daily" ? 1
+    : effectivePeriod === "weekly" ? 7
+    : daysInTargetMonth;
+  const budgetScale = periodDays / 30; // monthly budgets are the baseline
+
   // Donut data from expenses in this period, grouped by envelope.
   const envGroups = {};
   expenses.forEach((t) => {
-    const name = state.envelopes.find((e) => e.id === t.envId)?.name || "Other";
-    const pal = state.envelopes.find((e) => e.id === t.envId);
-    const idx = pal ? pal.pal : 0;
+    const env = state.envelopes.find((e) => e.id === t.envId);
+    const name = env ? env.name : "Other";
+    const idx = env ? env.pal : 0;
     if (!envGroups[name]) envGroups[name] = { name, value: 0, fill: CATEGORY_PALETTE[idx].dot };
     envGroups[name].value += t.amount;
   });
   const pieData = Object.values(envGroups).filter((d) => d.value > 0)
     .sort((a, b) => b.value - a.value);
 
-  // Envelope health for this period (spent in period vs budget).
-  // For weekly/daily, scale the monthly budget proportionally.
-  const budgetScale = period === "daily" ? 1 / 30 : period === "weekly" ? 7 / 30 : 1;
-
-  const periodLabel = period === "daily" ? "Today" : period === "weekly" ? "This week" : "This month";
+  const monthLabel = isCurrentMonth ? "This month" : fmtMonthShort(viewingMonth);
+  const periodLabel = effectivePeriod === "daily" ? "Today"
+    : effectivePeriod === "weekly" ? `This week (${fmtDate(startISO)} – ${fmtDate(endISO)})`
+    : monthLabel;
+  const shortLabel = effectivePeriod === "daily" ? "today" : effectivePeriod === "weekly" ? "this week" : monthLabel.toLowerCase();
 
   return (
     <div style={{ marginTop: 4 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
         <h4 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: C.ink }}>Spending outlook</h4>
         <div style={{ display: "flex", gap: 4, background: C.bg, borderRadius: 9, padding: 3 }}>
-          {["daily", "weekly", "monthly"].map((p) => (
-            <button key={p} onClick={() => setPeriod(p)} style={{
-              ...sx.modeBtn,
-              background: period === p ? C.lavDeep : "transparent",
-              color: period === p ? "#fff" : C.inkSoft,
-              textTransform: "capitalize",
-            }}>{p}</button>
-          ))}
+          {["daily", "weekly", "monthly"].map((p) => {
+            const disabled = !isCurrentMonth && p !== "monthly";
+            return (
+              <button key={p} onClick={() => !disabled && setPeriod(p)} style={{
+                ...sx.modeBtn,
+                background: effectivePeriod === p ? C.lavDeep : "transparent",
+                color: effectivePeriod === p ? "#fff" : disabled ? C.inkFaint : C.inkSoft,
+                textTransform: "capitalize",
+                opacity: disabled ? 0.45 : 1,
+                cursor: disabled ? "default" : "pointer",
+              }}>{p}</button>
+            );
+          })}
         </div>
       </div>
 
+      <p style={{ fontSize: 11.5, color: C.inkFaint, margin: "-4px 0 10px" }}>
+        {periodLabel} · {expenses.length} expense{expenses.length !== 1 ? "s" : ""}, {inflows.length} inflow{inflows.length !== 1 ? "s" : ""}
+      </p>
+
       {/* Inflow / Outflow summary */}
       <div style={sx.statRow}>
-        <StatCard label={`${periodLabel} inflow`} value={totalIn} accent={C.mintDeep} bg={C.mintBg} icon={TrendingUp} />
-        <StatCard label={`${periodLabel} outflow`} value={totalOut} accent={C.peachDeep} bg={C.peachBg} icon={Wallet} />
+        <StatCard label={`Inflow ${shortLabel}`} value={totalIn} accent={C.mintDeep} bg={C.mintBg} icon={TrendingUp} />
+        <StatCard label={`Outflow ${shortLabel}`} value={totalOut} accent={C.peachDeep} bg={C.peachBg} icon={Wallet} />
         <StatCard label="Net" value={totalIn - totalOut}
           accent={totalIn - totalOut >= 0 ? C.skyDeep : C.roseDeep}
           bg={totalIn - totalOut >= 0 ? C.skyBg : C.roseBg} icon={PiggyBank} />
@@ -1037,7 +1272,7 @@ function SpendingOutlook({ state }) {
       <div style={sx.chartRow}>
         {/* Donut: where money went this period */}
         <div style={{ ...sx.card, flex: 1, minWidth: 240 }}>
-          <h4 style={sx.cardH4}>Where money went — {periodLabel.toLowerCase()}</h4>
+          <h4 style={sx.cardH4}>Where money went — {shortLabel}</h4>
           {pieData.length > 0 ? (
             <>
               <ResponsiveContainer width="100%" height={180}>
@@ -1066,16 +1301,15 @@ function SpendingOutlook({ state }) {
                 ))}
               </div>
             </>
-          ) : <EmptyMini text={`No expenses logged ${periodLabel.toLowerCase()}`} />}
+          ) : <EmptyMini text={`No expenses logged ${shortLabel}`} />}
         </div>
 
         {/* Envelope health for this period */}
         <div style={{ ...sx.card, flex: 1.4, minWidth: 280 }}>
-          <h4 style={sx.cardH4}>Envelope health — {periodLabel.toLowerCase()}</h4>
+          <h4 style={sx.cardH4}>Envelope health — {shortLabel}</h4>
           {state.envelopes.filter((e) => e.budget > 0).length > 0 ? (
             <div>
               {state.envelopes.filter((e) => e.budget > 0).map((e) => {
-                // Sum expenses in this period for this envelope.
                 const periodSpent = expenses.filter((t) => t.envId === e.id)
                   .reduce((a, t) => a + t.amount, 0);
                 const scaledBudget = Math.round(e.budget * budgetScale);
@@ -1105,7 +1339,7 @@ function SpendingOutlook({ state }) {
               })}
               {period !== "monthly" && (
                 <p style={{ fontSize: 10, color: C.inkFaint, margin: "6px 0 0" }}>
-                  Budgets are scaled from your monthly amounts ({period === "daily" ? "÷30" : "×7/30"}).
+                  Budget scaled to {periodDays} day{periodDays !== 1 ? "s" : ""} from your monthly amounts.
                 </p>
               )}
             </div>
@@ -1396,7 +1630,10 @@ function Envelopes({ state, update }) {
   const [editing, setEditing] = useState(null);
   const [adding, setAdding] = useState(false);
 
-  const totalBudget = state.envelopes.reduce((a, e) => a + e.budget, 0);
+  // Use computed spent from transactions (current month only).
+  const envsWithSpent = m.envelopes;
+
+  const totalBudget = envsWithSpent.reduce((a, e) => a + e.budget, 0);
   const unallocated = m.income - totalBudget;
 
   const setBudget = (id, val) => {
@@ -1457,7 +1694,7 @@ function Envelopes({ state, update }) {
       </div>
 
       {groups.map((g) => {
-        const items = state.envelopes.filter((e) => e.type === g.type);
+        const items = envsWithSpent.filter((e) => e.type === g.type);
         const gBudget = items.reduce((a, e) => a + e.budget, 0);
         const gSpent = items.reduce((a, e) => a + e.spent, 0);
         const gPct = m.income > 0 ? Math.round((gBudget / m.income) * 100) : 0;
@@ -1558,6 +1795,7 @@ function Ledger({ state, update }) {
     date: todayISO(), type: "expense",
   });
   const [filter, setFilter] = useState("all");
+  const [monthFilter, setMonthFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [sortCol, setSortCol] = useState("date");
   const [sortDir, setSortDir] = useState("desc");
@@ -1643,6 +1881,7 @@ function Ledger({ state, update }) {
   if (filter === "inflow") list = list.filter((t) => t.type === "inflow");
   else if (filter === "expense") list = list.filter((t) => (t.type || "expense") === "expense");
   else if (filter !== "all") list = list.filter((t) => t.envId === filter);
+  if (monthFilter !== "all") list = list.filter((t) => (t.date || "").startsWith(monthFilter));
   if (search.trim()) {
     const q = search.toLowerCase();
     list = list.filter((t) => t.desc.toLowerCase().includes(q));
@@ -1732,6 +1971,12 @@ function Ledger({ state, update }) {
           <option value="expense">Expenses only</option>
           <option value="inflow">Inflows only</option>
           {state.envelopes.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+        </select>
+        <select style={sx.miniSelect} value={monthFilter} onChange={(e) => setMonthFilter(e.target.value)}>
+          <option value="all">All months</option>
+          {transactionMonths(state.transactions).map((m) => (
+            <option key={m} value={m}>{new Date(m + "-01").toLocaleString("en-SG", { month: "short", year: "numeric" })}</option>
+          ))}
         </select>
       </div>
       <div style={{ display: "flex", gap: 14, margin: "0 2px 12px", fontSize: 12, color: C.inkSoft }}>
@@ -1875,6 +2120,7 @@ function advanceDate(dateStr, freq) {
   if (freq === "daily") d.setDate(d.getDate() + 1);
   else if (freq === "weekly") d.setDate(d.getDate() + 7);
   else if (freq === "monthly") d.setMonth(d.getMonth() + 1);
+  else if (freq === "yearly") d.setFullYear(d.getFullYear() + 1);
   return d.toISOString().slice(0, 10);
 }
 
@@ -1905,6 +2151,7 @@ const FREQ_OPTIONS = [
   { key: "daily", label: "Daily" },
   { key: "weekly", label: "Weekly" },
   { key: "monthly", label: "Monthly" },
+  { key: "yearly", label: "Yearly" },
 ];
 
 /* ============================================================
@@ -2010,6 +2257,72 @@ function Goals({ state, update }) {
         <button style={sx.dashedBtn} onClick={() => setAdding(true)}>
           <Plus size={15} /> Create a new goal
         </button>
+      )}
+
+      {/* Personal notes */}
+      <GoalNotes state={state} update={update} />
+    </div>
+  );
+}
+
+function GoalNotes({ state, update }) {
+  const notes = state.goalNotes || "";
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(notes);
+
+  // Sync draft when notes change externally (e.g. import).
+  useEffect(() => { setDraft(state.goalNotes || ""); }, [state.goalNotes]);
+
+  const save = () => {
+    update((s) => ({ ...s, goalNotes: draft }));
+    setEditing(false);
+  };
+
+  return (
+    <div style={sx.card}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+        <h4 style={{ ...sx.cardH4, margin: 0 }}>
+          <BookOpen size={14} color={C.lavDeep} style={{ verticalAlign: -2, marginRight: 5 }} />
+          Personal notes
+        </h4>
+        {!editing && (
+          <button style={sx.linkBtn} onClick={() => { setDraft(notes); setEditing(true); }}>
+            <Pencil size={12} style={{ marginRight: 3 }} /> {notes ? "Edit" : "Add notes"}
+          </button>
+        )}
+      </div>
+
+      {editing ? (
+        <>
+          <textarea
+            style={{
+              ...sx.input, minHeight: 120, resize: "vertical", fontFamily: "inherit",
+              lineHeight: 1.6, fontSize: 12.5, whiteSpace: "pre-wrap",
+            }}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder="Write anything — financial goals, reminders to yourself, investment research notes, questions to look into…"
+            autoFocus
+          />
+          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            <button style={sx.ghostBtn} onClick={() => setEditing(false)}>Cancel</button>
+            <button style={sx.primaryBtn} onClick={save}>
+              <CheckCircle2 size={14} /> Save notes
+            </button>
+          </div>
+        </>
+      ) : notes ? (
+        <div style={{
+          fontSize: 12.5, color: C.inkSoft, lineHeight: 1.65, whiteSpace: "pre-wrap",
+          background: C.bg, padding: "10px 12px", borderRadius: 9,
+        }}>
+          {notes}
+        </div>
+      ) : (
+        <p style={{ fontSize: 12, color: C.inkFaint, margin: "4px 0 0" }}>
+          No notes yet. Use this space for anything — investment ideas, savings strategies,
+          things you want to research, or just a pep talk to future-you.
+        </p>
       )}
     </div>
   );
