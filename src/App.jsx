@@ -675,16 +675,6 @@ function SettingsPanel({ state, update, close }) {
         )}
 
         <BackupSection state={state} update={update} close={close} />
-
-        <button style={{ ...sx.ghostBtn, marginTop: 12, width: "100%", color: C.peachDeep }}
-          onClick={() => {
-            if (confirm("Reset everything? This clears all your data permanently.")) {
-              update({ ...DEFAULT_STATE });
-              close();
-            }
-          }}>
-          Reset all data
-        </button>
       </div>
     </div>
   );
@@ -959,18 +949,6 @@ function Dashboard({ state, update, goTo }) {
   const remaining = m.income - m.totalSpent + m.monthInflows;
   const spentPct = m.income > 0 ? Math.min(100, (m.totalSpent / m.income) * 100) : 0;
 
-  // Dynamic savings account balance = recorded savings + all inflows - all expenses (from all time)
-  const allExpenses = (state.transactions || []).filter((t) => (t.type || "expense") === "expense")
-    .reduce((a, t) => a + t.amount, 0);
-  const allInflows = (state.transactions || []).filter((t) => t.type === "inflow")
-    .reduce((a, t) => a + t.amount, 0);
-  const savingsAsset = (state.assets || []).find((a) => a.type === "savings");
-  const baseSavings = savingsAsset ? savingsAsset.amount : (state.profile.currentSavings || 0);
-  const dynamicSavings = baseSavings + allInflows - allExpenses;
-
-  const totalAssets = (state.assets || []).reduce((a, x) => a + x.amount, 0);
-  const dynamicNetWorth = totalAssets + allInflows - allExpenses;
-
   const topFlags = m.insights.filter((i) => i.sev === "alert" || i.sev === "warn").slice(0, 4);
 
   return (
@@ -1001,16 +979,22 @@ function Dashboard({ state, update, goTo }) {
         </select>
       </div>
 
-      {/* Hero stats — income, spent, inflows */}
+      {/* Hero stats — inflow / outflow / net for the selected month */}
       <div style={sx.statRow}>
-        <StatCard label="Take-home income" value={m.income} accent={C.mintDeep} bg={C.mintBg} icon={Wallet} />
-        <StatCard label={`Spent ${isCurrentMonth ? "this month" : fmtMonthShort(selectedMonth)}`}
-          value={m.totalSpent} accent={C.peachDeep} bg={C.peachBg} icon={TrendingUp} />
-        <StatCard label={`Inflows ${isCurrentMonth ? "this month" : fmtMonthShort(selectedMonth)}`}
-          value={m.monthInflows} accent={C.skyDeep} bg={C.skyBg} icon={TrendingUp} />
+        <StatCard
+          label={`Inflow ${isCurrentMonth ? "this month" : fmtMonthShort(selectedMonth)}`}
+          value={m.monthInflows} accent={C.mintDeep} bg={C.mintBg} icon={TrendingUp} />
+        <StatCard
+          label={`Outflow ${isCurrentMonth ? "this month" : fmtMonthShort(selectedMonth)}`}
+          value={m.totalSpent} accent={C.peachDeep} bg={C.peachBg} icon={Wallet} />
+        <StatCard
+          label="Net"
+          value={m.monthInflows - m.totalSpent}
+          accent={m.monthInflows - m.totalSpent >= 0 ? C.skyDeep : C.roseDeep}
+          bg={m.monthInflows - m.totalSpent >= 0 ? C.skyBg : C.roseBg} icon={PiggyBank} />
       </div>
 
-      {/* Spend progress bar */}
+      {/* Monthly spend pace */}
       <div style={sx.card}>
         <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
           <span style={{ fontSize: 13, fontWeight: 600, color: C.ink }}>Monthly spend pace</span>
@@ -1031,59 +1015,7 @@ function Dashboard({ state, update, goTo }) {
         </p>
       </div>
 
-      {/* ENVELOPE HEALTH — priority section */}
-      <div style={sx.card}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-          <h4 style={{ ...sx.cardH4, margin: 0 }}>
-            <Wallet size={14} color={C.lavDeep} style={{ verticalAlign: -2, marginRight: 5 }} />
-            Envelope health — {isCurrentMonth ? "this month" : fmtMonthShort(selectedMonth)}
-          </h4>
-          <button style={sx.linkBtn} onClick={() => goTo("envelopes")}>
-            Edit envelopes <ChevronRight size={13} />
-          </button>
-        </div>
-        {m.envelopes.filter((e) => e.budget > 0).length > 0 ? (
-          <div>
-            {m.envelopes.filter((e) => e.budget > 0).map((e) => {
-              const pctE = Math.min(100, (e.spent / e.budget) * 100);
-              const over = e.spent > e.budget;
-              const pal = CATEGORY_PALETTE[e.pal];
-              const left = e.budget - e.spent;
-              return (
-                <div key={e.id} style={{ marginBottom: 12 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, fontWeight: 700, color: C.ink }}>
-                      <span style={{ width: 8, height: 8, borderRadius: 4, background: pal.dot, display: "inline-block" }} />
-                      {e.name}
-                    </div>
-                    <span style={{ fontSize: 11, fontWeight: 800,
-                      color: over ? C.roseDeep : pctE > 85 ? C.butterDeep : C.mintDeep }}>
-                      {over ? `$${Math.round(e.spent - e.budget)} over budget` :
-                        `$${Math.round(left)} left`}
-                    </span>
-                  </div>
-                  <div style={{ ...sx.track, height: 7, marginTop: 5 }}>
-                    <div style={{ ...sx.fill, width: `${pctE}%`,
-                      background: over ? C.roseDeep : pctE > 85 ? C.butterDeep : pal.deep }} />
-                  </div>
-                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 3 }}>
-                    <span style={{ fontSize: 10, color: C.inkFaint }}>
-                      ${Math.round(e.spent)} spent
-                    </span>
-                    <span style={{ fontSize: 10, color: C.inkFaint }}>
-                      ${Math.round(e.budget)} budget
-                    </span>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        ) : (
-          <p style={{ fontSize: 12, color: C.inkFaint }}>Set envelope budgets in the Envelopes tab to see health here.</p>
-        )}
-      </div>
-
-      {/* Spending outlook (daily/weekly/monthly) */}
+      {/* Spending outlook — donut + envelope health (with daily/weekly/monthly toggle) */}
       <SpendingOutlook state={state} selectedMonth={selectedMonth} />
 
       {/* What needs your attention */}
@@ -1133,34 +1065,123 @@ function Dashboard({ state, update, goTo }) {
         })}
       </div>
 
-      {/* Net worth — dynamic */}
-      <div style={sx.card}>
-        <h4 style={sx.cardH4}>
+      {/* Financial snapshot — editable base assets + dynamic net worth */}
+      <FinancialSnapshot state={state} update={update} />
+    </div>
+  );
+}
+
+/* ============================================================
+   FINANCIAL SNAPSHOT — editable base assets + dynamic net worth
+   ============================================================ */
+function FinancialSnapshot({ state, update }) {
+  const [editing, setEditing] = useState(false);
+
+  // Pull base amounts from state.assets; default to 0 if not set.
+  const getAmount = (key) => {
+    const a = (state.assets || []).find((x) => x.type === key);
+    return a ? a.amount : 0;
+  };
+
+  // All-time inflows/expenses adjust the savings account dynamically.
+  const allExpenses = (state.transactions || []).filter((t) => (t.type || "expense") === "expense")
+    .reduce((a, t) => a + t.amount, 0);
+  const allInflows = (state.transactions || []).filter((t) => t.type === "inflow")
+    .reduce((a, t) => a + t.amount, 0);
+
+  const baseSavings = getAmount("savings");
+  const dynamicSavings = baseSavings + allInflows - allExpenses;
+
+  // Net worth = dynamic savings + other static asset categories.
+  const otherAssets = getAmount("fd") + getAmount("investments") + getAmount("cpf") + getAmount("other");
+  const estNetWorth = dynamicSavings + otherAssets;
+
+  const setAmount = (key, val) => {
+    const num = Number(val) || 0;
+    update((s) => {
+      const existing = (s.assets || []).filter((x) => x.type !== key);
+      const t = ASSET_TYPES.find((a) => a.key === key) || ASSET_TYPES[5];
+      const nextAssets = num > 0
+        ? [...existing, { id: "a" + key, type: key, label: t.label, amount: num }]
+        : existing;
+      const liquid = nextAssets.filter((x) => assetType(x.type).liquid)
+        .reduce((a, x) => a + x.amount, 0);
+      return {
+        ...s, assets: nextAssets,
+        profile: { ...s.profile, currentSavings: liquid },
+      };
+    });
+  };
+
+  return (
+    <div style={sx.card}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+        <h4 style={{ ...sx.cardH4, margin: 0 }}>
           <Landmark size={14} color={C.lavDeep} style={{ verticalAlign: -2, marginRight: 5 }} />
           Financial snapshot
         </h4>
-        <div style={sx.statRow}>
-          <div style={{ ...sx.statCard, background: C.lavBg, flex: 1 }}>
-            <div style={{ fontSize: 10.5, color: C.inkSoft, fontWeight: 600 }}>Est. net worth</div>
-            <div style={{ fontSize: 20, fontWeight: 800, color: C.lavDeep, marginTop: 4 }}>
-              ${Math.round(dynamicNetWorth).toLocaleString()}
-            </div>
-          </div>
-          <div style={{ ...sx.statCard, background: C.mintBg, flex: 1 }}>
-            <div style={{ fontSize: 10.5, color: C.inkSoft, fontWeight: 600 }}>Savings account</div>
-            <div style={{ fontSize: 20, fontWeight: 800, color: dynamicSavings >= 0 ? C.mintDeep : C.roseDeep, marginTop: 4 }}>
-              ${Math.round(dynamicSavings).toLocaleString()}
-            </div>
+        <button style={sx.linkBtn} onClick={() => setEditing(!editing)}>
+          {editing ? "Done" : "Edit assets"} <Pencil size={12} />
+        </button>
+      </div>
+
+      <div style={sx.statRow}>
+        <div style={{ ...sx.statCard, background: C.lavBg, flex: 1 }}>
+          <div style={{ fontSize: 10.5, color: C.inkSoft, fontWeight: 600 }}>Est. net worth</div>
+          <div style={{ fontSize: 20, fontWeight: 800, color: C.lavDeep, marginTop: 4 }}>
+            ${Math.round(estNetWorth).toLocaleString()}
           </div>
         </div>
-        <p style={{ fontSize: 10, color: C.inkFaint, margin: "4px 0 0" }}>
-          Adjusted from your recorded assets plus all tracked inflows minus all expenses.
-          <button style={{ ...sx.linkBtn, display: "inline", marginLeft: 4, fontSize: 10 }}
-            onClick={() => goTo("dashboard")}>
-            Update base assets in Settings
-          </button>
-        </p>
+        <div style={{ ...sx.statCard, background: C.mintBg, flex: 1 }}>
+          <div style={{ fontSize: 10.5, color: C.inkSoft, fontWeight: 600 }}>Savings account</div>
+          <div style={{ fontSize: 20, fontWeight: 800,
+            color: dynamicSavings >= 0 ? C.mintDeep : C.roseDeep, marginTop: 4 }}>
+            ${Math.round(dynamicSavings).toLocaleString()}
+          </div>
+        </div>
       </div>
+
+      <p style={{ fontSize: 10.5, color: C.inkFaint, margin: "4px 0 12px", lineHeight: 1.5 }}>
+        Savings = base savings + ${Math.round(allInflows).toLocaleString()} inflows − ${Math.round(allExpenses).toLocaleString()} expenses.
+        Net worth = savings + other assets.
+      </p>
+
+      {editing && (
+        <div>
+          <div style={{ ...sx.eduStrip, marginBottom: 10 }}>
+            <ShieldCheck size={14} color={C.skyDeep} />
+            <span>Edit your base balances. The <strong>savings account</strong> auto-syncs with every
+              ledger entry; the others are static figures you update when balances change.</span>
+          </div>
+          {ASSET_TYPES.map((t) => {
+            const isSavings = t.key === "savings";
+            const baseVal = getAmount(t.key);
+            return (
+              <div key={t.key} style={sx.assetCard}>
+                <div style={{ ...sx.assetIcon, background: CATEGORY_PALETTE[t.pal].bg }}>{t.icon}</div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 700, color: C.ink }}>{t.label}</div>
+                  <div style={{ fontSize: 10, color: C.inkFaint }}>
+                    {isSavings
+                      ? `Base $${Math.round(baseVal).toLocaleString()} → now ~$${Math.round(dynamicSavings).toLocaleString()} after ledger`
+                      : t.liquid ? "Liquid — backs your emergency fund" : "Longer-term — not for emergencies"}
+                  </div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                  <span style={{ fontSize: 11.5, color: C.inkFaint }}>$</span>
+                  <input
+                    style={sx.miniInput}
+                    type="number"
+                    value={baseVal || ""}
+                    placeholder="0"
+                    onChange={(e) => setAmount(t.key, e.target.value)}
+                  />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -1259,15 +1280,6 @@ function SpendingOutlook({ state, selectedMonth }) {
       <p style={{ fontSize: 11.5, color: C.inkFaint, margin: "-4px 0 10px" }}>
         {periodLabel} · {expenses.length} expense{expenses.length !== 1 ? "s" : ""}, {inflows.length} inflow{inflows.length !== 1 ? "s" : ""}
       </p>
-
-      {/* Inflow / Outflow summary */}
-      <div style={sx.statRow}>
-        <StatCard label={`Inflow ${shortLabel}`} value={totalIn} accent={C.mintDeep} bg={C.mintBg} icon={TrendingUp} />
-        <StatCard label={`Outflow ${shortLabel}`} value={totalOut} accent={C.peachDeep} bg={C.peachBg} icon={Wallet} />
-        <StatCard label="Net" value={totalIn - totalOut}
-          accent={totalIn - totalOut >= 0 ? C.skyDeep : C.roseDeep}
-          bg={totalIn - totalOut >= 0 ? C.skyBg : C.roseBg} icon={PiggyBank} />
-      </div>
 
       <div style={sx.chartRow}>
         {/* Donut: where money went this period */}
