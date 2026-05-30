@@ -1316,42 +1316,56 @@ function SpendingOutlook({ state, selectedMonth }) {
           ) : <EmptyMini text={`No expenses logged ${shortLabel}`} />}
         </div>
 
-        {/* Envelope health for this period */}
+        {/* Envelope health for this period — matches Envelopes tab format */}
         <div style={{ ...sx.card, flex: 1.4, minWidth: 280 }}>
           <h4 style={sx.cardH4}>Envelope health — {shortLabel}</h4>
           {state.envelopes.filter((e) => e.budget > 0).length > 0 ? (
             <div>
               {state.envelopes.filter((e) => e.budget > 0).map((e) => {
+                // Spent in this period (current month for monthly, today/this week otherwise).
                 const periodSpent = expenses.filter((t) => t.envId === e.id)
                   .reduce((a, t) => a + t.amount, 0);
-                const scaledBudget = Math.round(e.budget * budgetScale);
-                const pctE = scaledBudget > 0 ? Math.min(100, (periodSpent / scaledBudget) * 100) : 0;
-                const over = periodSpent > scaledBudget && scaledBudget > 0;
+                // For monthly view, use the raw envelope budget so it matches the Envelopes tab exactly.
+                // For daily/weekly, scale proportionally for a sensible comparison.
+                const effectiveBudget = effectivePeriod === "monthly"
+                  ? e.budget
+                  : Math.round(e.budget * budgetScale);
+                const pctE = effectiveBudget > 0 ? Math.min(100, (periodSpent / effectiveBudget) * 100) : 0;
+                const over = periodSpent > effectiveBudget && effectiveBudget > 0;
                 const pal = CATEGORY_PALETTE[e.pal];
+                const left = effectiveBudget - periodSpent;
                 return (
-                  <div key={e.id} style={{ marginBottom: 10 }}>
+                  <div key={e.id} style={{ marginBottom: 12 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, fontWeight: 700, color: C.ink }}>
-                        <span style={{ width: 7, height: 7, borderRadius: 3, background: pal.dot, display: "inline-block" }} />
+                      <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, fontWeight: 700, color: C.ink }}>
+                        <span style={{ width: 8, height: 8, borderRadius: 4, background: pal.dot, display: "inline-block" }} />
                         {e.name}
                       </div>
-                      <span style={{ fontSize: 10.5, fontWeight: 700,
-                        color: over ? C.roseDeep : pctE > 85 ? C.butterDeep : C.inkFaint }}>
-                        ${Math.round(periodSpent)} / ${scaledBudget}
-                        {over ? ` · $${Math.round(periodSpent - scaledBudget)} over` :
-                          ` · $${Math.round(scaledBudget - periodSpent)} left`}
+                      <span style={{ fontSize: 11, fontWeight: 800,
+                        color: over ? C.roseDeep : pctE > 85 ? C.butterDeep : C.mintDeep }}>
+                        {over ? `$${Math.round(periodSpent - effectiveBudget)} over budget` :
+                          `$${Math.round(left)} left`}
                       </span>
                     </div>
-                    <div style={{ ...sx.track, height: 6, marginTop: 4 }}>
+                    <div style={{ ...sx.track, height: 7, marginTop: 5 }}>
                       <div style={{ ...sx.fill, width: `${pctE}%`,
                         background: over ? C.roseDeep : pctE > 85 ? C.butterDeep : pal.deep }} />
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginTop: 3 }}>
+                      <span style={{ fontSize: 10, color: over ? C.roseDeep : C.inkFaint }}>
+                        ${Math.round(periodSpent)} spent
+                      </span>
+                      <span style={{ fontSize: 10, color: C.inkFaint }}>
+                        ${Math.round(effectiveBudget)} budget
+                      </span>
                     </div>
                   </div>
                 );
               })}
-              {period !== "monthly" && (
+              {effectivePeriod !== "monthly" && (
                 <p style={{ fontSize: 10, color: C.inkFaint, margin: "6px 0 0" }}>
                   Budget scaled to {periodDays} day{periodDays !== 1 ? "s" : ""} from your monthly amounts.
+                  Switch to <strong>monthly</strong> to match the Envelopes tab exactly.
                 </p>
               )}
             </div>
