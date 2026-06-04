@@ -2288,6 +2288,25 @@ const GOAL_PRESETS = [
 function Goals({ state, update }) {
   const [adding, setAdding] = useState(false);
   const [contributeTo, setContributeTo] = useState(null);
+  const [editingId, setEditingId] = useState(null);
+  const [editForm, setEditForm] = useState({});
+
+  // Always sort goals by deadline (earliest first). Goals without a deadline go to bottom.
+  const sortedGoals = useMemo(() => {
+    const indexed = state.goals.map((g, i) => ({ g, i }));
+    indexed.sort((a, b) => {
+      const aHas = !!a.g.deadline;
+      const bHas = !!b.g.deadline;
+      if (aHas && bHas) {
+        if (a.g.deadline !== b.g.deadline) return a.g.deadline.localeCompare(b.g.deadline);
+        return a.i - b.i;
+      }
+      if (aHas) return -1;
+      if (bHas) return 1;
+      return a.i - b.i;
+    });
+    return indexed.map((x) => x.g);
+  }, [state.goals]);
 
   const addGoal = (g) => {
     update((s) => ({
@@ -2306,10 +2325,30 @@ function Goals({ state, update }) {
     setContributeTo(null);
   };
 
+  // Inline editing
+  const startEdit = (g) => {
+    setEditingId(g.id);
+    setEditForm({ name: g.name, target: g.target, saved: g.saved, note: g.note || "", deadline: g.deadline || "" });
+  };
+  const cancelEdit = () => { setEditingId(null); setEditForm({}); };
+  const saveEdit = (id) => {
+    const target = Number(editForm.target) || 0;
+    const saved = Number(editForm.saved) || 0;
+    if (!editForm.name || target < 0 || saved < 0) return;
+    update((s) => ({
+      ...s,
+      goals: s.goals.map((g) => g.id === id
+        ? { ...g, name: editForm.name, target, saved, note: editForm.note, deadline: editForm.deadline }
+        : g),
+    }));
+    setEditingId(null);
+    setEditForm({});
+  };
+
   return (
     <div>
       <SectionTitle icon={Target} title="Goal trackers"
-        subtitle="Big plans become real when you can see the milestones" />
+        subtitle="Sorted by target deadline — closest first" />
 
       <div style={sx.eduStrip}>
         <Lightbulb size={14} color={C.butterDeep} />
@@ -2317,27 +2356,86 @@ function Goals({ state, update }) {
           between mid-term goals (travel, reno) and long-term investing. Don't invest money you'll need within ~3 years.</span>
       </div>
 
-      {state.goals.map((g) => {
+      {sortedGoals.map((g) => {
         const pct = g.target > 0 ? Math.min(100, (g.saved / g.target) * 100) : 0;
         const done = pct >= 100;
         const monthsLeft = g.deadline ? monthsBetween(new Date(), new Date(g.deadline)) : null;
         const perMonth = monthsLeft && monthsLeft > 0 ? (g.target - g.saved) / monthsLeft : null;
+        const isEditing = editingId === g.id;
+
+        if (isEditing) {
+          return (
+            <div key={g.id} style={{ ...sx.goalCard, background: C.lavBg, borderColor: C.lav }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <div style={sx.goalIcon}>{goalIcon(g.icon)}</div>
+                  <span style={{ fontSize: 12.5, fontWeight: 700, color: C.lavDeep }}>Editing goal</span>
+                </div>
+              </div>
+              <Field label="Goal name">
+                <input style={sx.input} value={editForm.name}
+                  onChange={(e) => setEditForm({ ...editForm, name: e.target.value })} />
+              </Field>
+              <div style={{ display: "flex", gap: 8 }}>
+                <Field label="Target amount (SGD)">
+                  <input style={sx.input} type="number" value={editForm.target}
+                    onChange={(e) => setEditForm({ ...editForm, target: e.target.value })} />
+                </Field>
+                <Field label="Amount saved (SGD)">
+                  <input style={sx.input} type="number" value={editForm.saved}
+                    onChange={(e) => setEditForm({ ...editForm, saved: e.target.value })} />
+                </Field>
+              </div>
+              <Field label="Target date (optional)">
+                <input style={sx.input} type="month" value={editForm.deadline}
+                  onChange={(e) => setEditForm({ ...editForm, deadline: e.target.value })} />
+              </Field>
+              <Field label="Notes / remarks">
+                <textarea
+                  style={{ ...sx.input, minHeight: 70, resize: "vertical", fontFamily: "inherit",
+                    lineHeight: 1.5, whiteSpace: "pre-wrap" }}
+                  value={editForm.note}
+                  onChange={(e) => setEditForm({ ...editForm, note: e.target.value })}
+                  placeholder="Any context, links, or reminders for this goal…"
+                />
+              </Field>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button style={sx.ghostBtn} onClick={cancelEdit}>Cancel</button>
+                <button style={sx.primaryBtn} onClick={() => saveEdit(g.id)}>
+                  <CheckCircle2 size={14} /> Save changes
+                </button>
+              </div>
+            </div>
+          );
+        }
+
         return (
           <div key={g.id} style={sx.goalCard}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-              <div style={{ display: "flex", gap: 10 }}>
+              <div style={{ display: "flex", gap: 10, flex: 1, minWidth: 0 }}>
                 <div style={sx.goalIcon}>{goalIcon(g.icon)}</div>
-                <div>
+                <div style={{ minWidth: 0 }}>
                   <div style={{ fontSize: 14, fontWeight: 700, color: C.ink }}>{g.name}</div>
                   <div style={{ fontSize: 11.5, color: C.inkSoft }}>
                     ${Math.round(g.saved).toLocaleString()} of ${Math.round(g.target).toLocaleString()}
                     {done && <span style={{ color: C.mintDeep, fontWeight: 700 }}> · Reached! 🎉</span>}
                   </div>
+                  {g.deadline && (
+                    <div style={{ fontSize: 10.5, color: C.skyDeep, marginTop: 2, fontWeight: 600 }}>
+                      <CalendarClock size={10} style={{ verticalAlign: -1, marginRight: 3 }} />
+                      Target: {fmtMonthShort(g.deadline.slice(0, 7))}
+                    </div>
+                  )}
                 </div>
               </div>
-              <button style={sx.miniIconBtn} onClick={() => delGoal(g.id)} aria-label="Delete">
-                <Trash2 size={13} color={C.inkFaint} />
-              </button>
+              <div style={{ display: "flex", gap: 2 }}>
+                <button style={sx.miniIconBtn} onClick={() => startEdit(g)} aria-label="Edit">
+                  <Pencil size={13} color={C.inkFaint} />
+                </button>
+                <button style={sx.miniIconBtn} onClick={() => delGoal(g.id)} aria-label="Delete">
+                  <Trash2 size={13} color={C.inkFaint} />
+                </button>
+              </div>
             </div>
 
             <div style={{ ...sx.track, marginTop: 10, height: 9 }}>
@@ -2355,7 +2453,7 @@ function Goals({ state, update }) {
 
             {g.note && (
               <p style={{ fontSize: 11.5, color: C.inkSoft, margin: "8px 0 0", lineHeight: 1.5,
-                background: C.bg, padding: "6px 9px", borderRadius: 7 }}>
+                background: C.bg, padding: "6px 9px", borderRadius: 7, whiteSpace: "pre-wrap" }}>
                 {g.note}
               </p>
             )}
