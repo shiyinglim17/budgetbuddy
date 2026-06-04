@@ -83,6 +83,37 @@ function cpfBreakdown(grossMonthly) {
   };
 }
 
+// Resolve which salary applies for a given month (YYYY-MM).
+// Looks through salaryRecords; falls back to legacy state.profile.grossSalary.
+// Returns { amount, type, takeHome, grossWithCpf, isFromRecord }.
+function salaryForMonth(state, monthStr) {
+  const records = state.salaryRecords || [];
+  // Find matching record(s); if multiple cover this month, use the most recently created one.
+  const matching = records.filter((r) => {
+    if (!r.fromMonth) return false;
+    if (monthStr < r.fromMonth) return false;
+    if (r.untilMonth && monthStr > r.untilMonth) return false;
+    return true;
+  });
+  if (matching.length > 0) {
+    // Sort by id (timestamp-based) so latest entry wins on overlap.
+    const r = matching.sort((a, b) => b.id.localeCompare(a.id))[0];
+    if (r.type === "withoutCpf") {
+      return { amount: r.amount, type: "withoutCpf", takeHome: r.amount,
+        grossWithCpf: 0, isFromRecord: true };
+    } else {
+      const cpf = cpfBreakdown(r.amount);
+      return { amount: r.amount, type: "withCpf", takeHome: cpf.takeHome,
+        grossWithCpf: r.amount, isFromRecord: true };
+    }
+  }
+  // Legacy fallback: treat profile.grossSalary as "withCpf"
+  const legacy = state.profile.grossSalary || 0;
+  const cpf = cpfBreakdown(legacy);
+  return { amount: legacy, type: "withCpf", takeHome: cpf.takeHome,
+    grossWithCpf: legacy, isFromRecord: false };
+}
+
 /* Asset types for the net-worth profile. Liquidity flags whether the money
    is readily spendable — used to size the emergency fund correctly. */
 const ASSET_TYPES = [
@@ -110,7 +141,12 @@ const DEFAULT_STATE = {
     startWorkMonth: "",
   },
   // Salary change log — appended every time salary is updated, newest first.
+  // (Legacy format: { id, date, from, to, reason }. Kept for backwards compat.)
   salaryHistory: [],
+  // Salary records — each entry specifies an amount, type (withCpf/withoutCpf),
+  // and a month range it applies to. Newest records override overlapping older ones.
+  // Each: { id, amount, type, fromMonth (YYYY-MM), untilMonth (YYYY-MM or "") }
+  salaryRecords: [],
   // Current assets across all account types — stored locally only.
   assets: [],
   // Envelope budget categories (50/30/20-inspired but editable)
@@ -588,32 +624,50 @@ function Header({ state, update }) {
 }
 
 function SettingsPanel({ state, update, close }) {
-  const [gross, setGross] = useState(state.profile.grossSalary);
-  const [reason, setReason] = useState("");
-  const history = state.salaryHistory || [];
-  const changed = Number(gross) !== state.profile.grossSalary && gross !== "";
+  const [salaryType, setSalaryType] = useState("withCpf"); // "withCpf" or "withoutCpf"
+  const [amount, setAmount] = useState("");
+  const [fromMonth, setFromMonth] = useState(currentMonthStr());
+  const [untilMonth, setUntilMonth] = useState("");
+  const records = state.salaryRecords || [];
 
-  const saveSalary = () => {
-    const newSalary = Number(gross) || 0;
-    if (newSalary === state.profile.grossSalary) { close(); return; }
-    const entry = {
-      id: "sh" + Date.now(),
-      date: new Date().toISOString().slice(0, 10),
-      from: state.profile.grossSalary,
-      to: newSalary,
-      reason: reason.trim() || "Salary updated",
+  const addRecord = () => {
+    const num = Number(amount);
+    if (!num || num <= 0 || !fromMonth) return;
+    const rec = {
+      id: "sr" + Date.now(),
+      amount: num,
+      type: salaryType,
+      fromMonth,
+      untilMonth: untilMonth || "",
     };
     update((s) => ({
       ...s,
-      profile: { ...s.profile, grossSalary: newSalary },
-      salaryHistory: [entry, ...(s.salaryHistory || [])].slice(0, 40),
+      salaryRecords: [rec, ...(s.salaryRecords || [])],
+      // Also update profile.grossSalary to the latest "withCpf" amount, so legacy
+      // displays (onboarding CPF box, etc.) stay sensible.
+      profile: salaryType === "withCpf"
+        ? { ...s.profile, grossSalary: num }
+        : s.profile,
     }));
-    close();
+    setAmount("");
+    setUntilMonth("");
   };
+
+  const deleteRecord = (id) => {
+    update((s) => ({ ...s, salaryRecords: (s.salaryRecords || []).filter((r) => r.id !== id) }));
+  };
+
+  // Preview: what does this salary translate to as take-home?
+  const previewTakeHome = (() => {
+    const num = Number(amount) || 0;
+    if (!num) return null;
+    if (salaryType === "withoutCpf") return num;
+    return cpfBreakdown(num).takeHome;
+  })();
 
   return (
     <div style={sx.modalOverlay} onClick={close}>
-      <div style={{ ...sx.modal, width: 330, maxHeight: "82vh", overflowY: "auto" }}
+      <div style={{ ...sx.modal, width: 360, maxHeight: "85vh", overflowY: "auto" }}
         onClick={(e) => e.stopPropagation()}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
           <h3 style={{ margin: 0, fontSize: 16, color: C.ink }}>Settings</h3>
@@ -622,55 +676,92 @@ function SettingsPanel({ state, update, close }) {
 
         <div style={{ ...sx.eduStrip, marginBottom: 12 }}>
           <Briefcase size={14} color={C.lavDeep} />
-          <span>Changed jobs or got a raise? Update your salary here anytime — each change is logged so you can see your earning history.</span>
+          <span>Add a salary record for any month range. Every tab calculates against the right
+            salary for whichever month you're viewing.</span>
         </div>
 
-        <Field label="Gross monthly salary (SGD)">
-          <input style={sx.input} type="number" value={gross}
-            onChange={(e) => setGross(e.target.value)} placeholder="e.g. 4800" />
+        <div style={{ fontSize: 12, fontWeight: 700, color: C.inkSoft, marginBottom: 8 }}>
+          Salary type
+        </div>
+        <div style={{ display: "flex", gap: 5, marginBottom: 12 }}>
+          <button onClick={() => setSalaryType("withCpf")} style={{
+            ...sx.chip, fontSize: 11,
+            background: salaryType === "withCpf" ? C.lavDeep : C.lavBg,
+            color: salaryType === "withCpf" ? "#fff" : C.lavDeep,
+          }}>With CPF deduction</button>
+          <button onClick={() => setSalaryType("withoutCpf")} style={{
+            ...sx.chip, fontSize: 11,
+            background: salaryType === "withoutCpf" ? C.lavDeep : C.lavBg,
+            color: salaryType === "withoutCpf" ? "#fff" : C.lavDeep,
+          }}>No CPF deduction</button>
+        </div>
+        <p style={{ fontSize: 11, color: C.inkFaint, margin: "0 0 12px", lineHeight: 1.5 }}>
+          {salaryType === "withCpf"
+            ? "Your gross salary; CPF (20%) is deducted to give take-home."
+            : "Your full monthly income with no CPF deduction (e.g. allowance, freelance, internship)."}
+        </p>
+
+        <Field label={salaryType === "withCpf" ? "Gross monthly salary with CPF (SGD)" : "Monthly income without CPF (SGD)"}>
+          <input style={sx.input} type="number" value={amount}
+            onChange={(e) => setAmount(e.target.value)} placeholder="e.g. 2000" />
         </Field>
-        {changed && (
-          <Field label="Reason for change (optional)">
-            <input style={sx.input} value={reason}
-              onChange={(e) => setReason(e.target.value)}
-              placeholder="e.g. New job at..., Annual increment" />
-          </Field>
+
+        {previewTakeHome !== null && (
+          <div style={{ ...sx.tipBox, background: C.skyBg, margin: "0 0 12px" }}>
+            <Info size={14} color={C.skyDeep} />
+            <p style={{ margin: 0, fontSize: 12, color: C.ink, lineHeight: 1.5 }}>
+              Take-home: <strong>${Math.round(previewTakeHome).toLocaleString()}/mo</strong>
+              {salaryType === "withCpf" && ` (after $${Math.round(cpfBreakdown(Number(amount)).employeeCpf).toLocaleString()} CPF)`}
+              . This is what every tab uses for the months below.
+            </p>
+          </div>
         )}
-        <button style={sx.primaryBtn} onClick={saveSalary}>
-          {changed ? "Save salary change" : "Done"}
+
+        <div style={{ display: "flex", gap: 8 }}>
+          <Field label="From month">
+            <input style={sx.input} type="month" value={fromMonth}
+              onChange={(e) => setFromMonth(e.target.value)} />
+          </Field>
+          <Field label="Until month (optional)">
+            <input style={sx.input} type="month" value={untilMonth}
+              onChange={(e) => setUntilMonth(e.target.value)} />
+          </Field>
+        </div>
+        <p style={{ fontSize: 10.5, color: C.inkFaint, margin: "-8px 0 12px" }}>
+          Leave "until" blank if this salary is ongoing. Newer records override older ones for overlapping months.
+        </p>
+
+        <button style={{ ...sx.primaryBtn, opacity: amount && fromMonth ? 1 : 0.5 }}
+          disabled={!amount || !fromMonth} onClick={addRecord}>
+          <Plus size={14} /> Save salary record
         </button>
 
-        {changed && (
-          <p style={{ fontSize: 11, color: C.skyDeep, margin: "8px 0 0", lineHeight: 1.5 }}>
-            Note: this updates your income figure. Your envelope budgets stay as-is —
-            review them on the Envelopes tab to re-balance against your new income.
-          </p>
-        )}
-
-        {history.length > 0 && (
+        {records.length > 0 && (
           <div style={{ marginTop: 16 }}>
             <div style={{ fontSize: 12, fontWeight: 700, color: C.inkSoft, marginBottom: 8 }}>
-              Salary history
+              Salary records ({records.length})
             </div>
-            {history.map((h) => {
-              const up = h.to >= h.from;
-              return (
-                <div key={h.id} style={sx.histRow}>
-                  <div>
-                    <div style={{ fontSize: 12, fontWeight: 700, color: C.ink }}>{h.reason}</div>
-                    <div style={{ fontSize: 10.5, color: C.inkFaint }}>{fmtDate(h.date)}</div>
+            {records.sort((a, b) => b.fromMonth.localeCompare(a.fromMonth)).map((r) => (
+              <div key={r.id} style={{ ...sx.histRow, alignItems: "flex-start" }}>
+                <div>
+                  <div style={{ fontSize: 12.5, fontWeight: 700, color: C.ink }}>
+                    ${Math.round(r.amount).toLocaleString()}
+                    <span style={{ fontSize: 10, fontWeight: 600, color: C.inkFaint, marginLeft: 5 }}>
+                      {r.type === "withCpf" ? "with CPF" : "no CPF"}
+                    </span>
                   </div>
-                  <div style={{ textAlign: "right" }}>
-                    <div style={{ fontSize: 12, fontWeight: 700, color: up ? C.mintDeep : C.peachDeep }}>
-                      ${Math.round(h.to).toLocaleString()}
-                    </div>
-                    <div style={{ fontSize: 10, color: C.inkFaint }}>
-                      from ${Math.round(h.from).toLocaleString()}
-                    </div>
+                  <div style={{ fontSize: 10.5, color: C.inkSoft, marginTop: 2 }}>
+                    {fmtMonthShort(r.fromMonth)} – {r.untilMonth ? fmtMonthShort(r.untilMonth) : "ongoing"}
+                  </div>
+                  <div style={{ fontSize: 10, color: C.mintDeep, marginTop: 2, fontWeight: 700 }}>
+                    Take-home: ${Math.round(r.type === "withCpf" ? cpfBreakdown(r.amount).takeHome : r.amount).toLocaleString()}/mo
                   </div>
                 </div>
-              );
-            })}
+                <button style={sx.miniIconBtn} onClick={() => deleteRecord(r.id)} aria-label="Delete">
+                  <Trash2 size={13} color={C.inkFaint} />
+                </button>
+              </div>
+            ))}
           </div>
         )}
 
@@ -776,8 +867,11 @@ function BackupSection({ state, update, close }) {
    ============================================================ */
 function buildInsights(state, monthStr) {
   const targetMonth = monthStr || currentMonthStr();
-  const cpf = cpfBreakdown(state.profile.grossSalary);
-  const income = cpf.takeHome + (state.profile.monthlyIncomeOther || 0);
+  const sal = salaryForMonth(state, targetMonth);
+  // Synthesise cpf info for the resolved salary (for AI coach context).
+  const cpf = sal.type === "withCpf" ? cpfBreakdown(sal.amount)
+    : { takeHome: sal.amount, employeeCpf: 0, employerCpf: 0, totalCpf: 0, oa: 0, sa: 0, ma: 0 };
+  const income = sal.takeHome + (state.profile.monthlyIncomeOther || 0);
   const monthSpent = computeEnvelopeSpent(state.transactions, targetMonth);
   const env = state.envelopes.map((e) => ({ ...e, spent: monthSpent[e.id] || 0 }));
   const totalBudget = env.reduce((a, e) => a + e.budget, 0);
