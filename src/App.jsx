@@ -5,12 +5,31 @@ import {
   Plane, Hammer, ShieldCheck, ArrowRight, Pencil, X, GraduationCap,
   BookOpen, Coffee, Lightbulb, ChevronRight, Settings, Briefcase, Landmark,
   RefreshCw, HandCoins, BellRing, CalendarClock, Download, Upload,
-  Search, ArrowUpDown, ArrowDownUp, ChevronDown, ChevronUp
+  Search, ArrowUpDown, ArrowDownUp, ChevronDown, ChevronUp, FolderOpen
 } from "lucide-react";
 import {
   PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis,
   Tooltip, CartesianGrid, Legend, LineChart, Line, AreaChart, Area
 } from "recharts";
+import {
+  parseBankCsv, isTravelSpendCsv, parseTravelSpendCsv,
+  reconcile, buildHistoryIndex, suggestEnvelope,
+} from "./bankImport.js";
+
+/* ============================================================
+   EXCHANGE / TRIP EXPENDITURE
+   Imported from a TravelSpend CSV via the Ledger's import panel (no
+   personal data ships with the app). Entries are tagged `tag: "exchange"`:
+   - appended only (never modify or remove existing transactions),
+   - deduplicated against entries already in the ledger,
+   - excluded from the dynamic savings balance (your base savings already
+     reflects this past spending) and from envelope `spent` accumulators.
+   ============================================================ */
+const EXCHANGE_TAG = "exchange";
+const isExchangeTxn = (t) => t.tag === EXCHANGE_TAG;
+// Imported rows (exchange history, bank statements) never touch the legacy
+// envelope `spent` accumulator, so edits/deletes of them mustn't either.
+const skipsEnvAccumulator = (t) => isExchangeTxn(t) || t.source === "bank";
 
 /* ============================================================
    PASTEL DESIGN TOKENS
@@ -1178,13 +1197,23 @@ function FinancialSnapshot({ state, update }) {
   };
 
   // All-time inflows/expenses adjust the savings account dynamically.
-  const allExpenses = (state.transactions || []).filter((t) => (t.type || "expense") === "expense")
+  // Imported exchange history is excluded — base savings already reflects it.
+  const liveTxns = (state.transactions || []).filter((t) => !isExchangeTxn(t));
+  const allExpenses = liveTxns.filter((t) => (t.type || "expense") === "expense")
     .reduce((a, t) => a + t.amount, 0);
-  const allInflows = (state.transactions || []).filter((t) => t.type === "inflow")
+  const allInflows = liveTxns.filter((t) => t.type === "inflow")
     .reduce((a, t) => a + t.amount, 0);
 
   const baseSavings = getAmount("savings");
-  const dynamicSavings = baseSavings + allInflows - allExpenses;
+  // When a bank statement has synced the balance, it is the truth as at
+  // `bankSync.asOf`; only entries dated after that adjust it further.
+  const bankSync = state.bankSync;
+  const postSync = bankSync ? liveTxns.filter((t) => (t.date || "") > bankSync.asOf) : null;
+  const dynamicSavings = bankSync
+    ? baseSavings
+      + postSync.filter((t) => t.type === "inflow").reduce((a, t) => a + t.amount, 0)
+      - postSync.filter((t) => (t.type || "expense") === "expense").reduce((a, t) => a + t.amount, 0)
+    : baseSavings + allInflows - allExpenses;
 
   // Net worth = dynamic savings + other static asset categories.
   const otherAssets = getAmount("fd") + getAmount("investments") + getAmount("cpf") + getAmount("other");
@@ -1203,6 +1232,9 @@ function FinancialSnapshot({ state, update }) {
       return {
         ...s, assets: nextAssets,
         profile: { ...s.profile, currentSavings: liquid },
+        // A manual savings edit means "this is my balance today".
+        ...(key === "savings" && s.bankSync
+          ? { bankSync: { ...s.bankSync, asOf: todayISO(), source: "manual" } } : {}),
       };
     });
   };
@@ -1236,7 +1268,9 @@ function FinancialSnapshot({ state, update }) {
       </div>
 
       <p style={{ fontSize: 10.5, color: C.inkFaint, margin: "4px 0 12px", lineHeight: 1.5 }}>
-        Savings = base savings + ${Math.round(allInflows).toLocaleString()} inflows − ${Math.round(allExpenses).toLocaleString()} expenses.
+        {bankSync
+          ? <>Savings = {bankSync.source === "manual" ? "balance you set" : "bank balance"} ${Math.round(baseSavings).toLocaleString()} as at {fmtDate(bankSync.asOf)} + {postSync.length} ledger entr{postSync.length === 1 ? "y" : "ies"} since.{" "}</>
+          : <>Savings = base savings + ${Math.round(allInflows).toLocaleString()} inflows − ${Math.round(allExpenses).toLocaleString()} expenses.{" "}</>}
         Net worth = savings + other assets.
       </p>
 
@@ -1916,6 +1950,8 @@ function Ledger({ state, update }) {
   });
   const [filter, setFilter] = useState("all");
   const [monthFilter, setMonthFilter] = useState("all");
+  const [exchangeFilter, setExchangeFilter] = useState("all"); // all | only | exclude
+  const [showBankImport, setShowBankImport] = useState(false);
   const [search, setSearch] = useState("");
   const [sortCol, setSortCol] = useState("date");
   const [sortDir, setSortDir] = useState("desc");
@@ -1945,7 +1981,8 @@ function Ledger({ state, update }) {
     update((s) => ({
       ...s,
       transactions: s.transactions.filter((x) => x.id !== t.id),
-      envelopes: t.type === "inflow" ? s.envelopes
+      // Imported exchange rows never touched the envelope accumulator, so don't undo it.
+      envelopes: (t.type === "inflow" || skipsEnvAccumulator(t)) ? s.envelopes
         : s.envelopes.map((e) => e.id === t.envId
           ? { ...e, spent: Math.max(0, e.spent - t.amount) } : e),
     }));
@@ -1962,13 +1999,14 @@ function Ledger({ state, update }) {
     if (!editForm.desc || newAmt <= 0) return;
     const oldIsExpense = (t.type || "expense") === "expense";
     const newIsExpense = (editForm.type || "expense") === "expense";
+    const skipEnvAccumulator = skipsEnvAccumulator(t);
     update((s) => {
       // First undo old envelope effect
-      let envs = oldIsExpense
+      let envs = skipEnvAccumulator ? [...s.envelopes] : oldIsExpense
         ? s.envelopes.map((e) => e.id === t.envId ? { ...e, spent: Math.max(0, e.spent - t.amount) } : e)
         : [...s.envelopes];
       // Then apply new envelope effect
-      if (newIsExpense) {
+      if (newIsExpense && !skipEnvAccumulator) {
         const newEnvId = editForm.envId === "__inflow" ? (s.envelopes[0]?.id || "") : editForm.envId;
         envs = envs.map((e) => e.id === newEnvId ? { ...e, spent: e.spent + newAmt } : e);
       }
@@ -2002,6 +2040,8 @@ function Ledger({ state, update }) {
   else if (filter === "expense") list = list.filter((t) => (t.type || "expense") === "expense");
   else if (filter !== "all") list = list.filter((t) => t.envId === filter);
   if (monthFilter !== "all") list = list.filter((t) => (t.date || "").startsWith(monthFilter));
+  if (exchangeFilter === "only") list = list.filter(isExchangeTxn);
+  else if (exchangeFilter === "exclude") list = list.filter((t) => !isExchangeTxn(t));
   if (search.trim()) {
     const q = search.toLowerCase();
     list = list.filter((t) => t.desc.toLowerCase().includes(q));
@@ -2036,6 +2076,14 @@ function Ledger({ state, update }) {
     <div>
       <SectionTitle icon={ListChecks} title="Expense ledger"
         subtitle="Log every transaction — expenses and inflows alike" />
+
+      {showBankImport ? (
+        <BankImportPanel state={state} update={update} close={() => setShowBankImport(false)} />
+      ) : (
+        <button style={{ ...sx.softBtn, width: "100%", marginBottom: 12 }} onClick={() => setShowBankImport(true)}>
+          <Upload size={13} /> Import CSV (bank statement or TravelSpend)
+        </button>
+      )}
 
       {/* Quick add */}
       <div style={sx.card}>
@@ -2098,6 +2146,13 @@ function Ledger({ state, update }) {
             <option key={m} value={m}>{new Date(m + "-01").toLocaleString("en-SG", { month: "short", year: "numeric" })}</option>
           ))}
         </select>
+        {(state.transactions || []).some(isExchangeTxn) && (
+          <select style={sx.miniSelect} value={exchangeFilter} onChange={(e) => setExchangeFilter(e.target.value)}>
+            <option value="all">Incl. exchange</option>
+            <option value="exclude">Exclude exchange</option>
+            <option value="only">Exchange only</option>
+          </select>
+        )}
       </div>
       <div style={{ display: "flex", gap: 14, margin: "0 2px 12px", fontSize: 12, color: C.inkSoft }}>
         <span>{sorted.length} item{sorted.length !== 1 ? "s" : ""}</span>
@@ -2185,7 +2240,16 @@ function Ledger({ state, update }) {
                   return (
                     <tr key={t.id}>
                       <td style={sx.td}>{fmtDate(t.date)}</td>
-                      <td style={{ ...sx.td, fontWeight: 600, color: C.ink }}>{t.desc}</td>
+                      <td style={{ ...sx.td, fontWeight: 600, color: C.ink }}>
+                        {t.desc}
+                        {isExchangeTxn(t) && (
+                          <span title={`Exchange · ${t.category} · ${t.localAmount} ${t.localCurrency} · ${t.paymentMethod}${t.place ? " · " + t.place : ""}`}
+                            style={{ marginLeft: 6, fontSize: 9.5, fontWeight: 700, color: C.skyDeep,
+                              background: C.skyBg, borderRadius: 5, padding: "1px 5px", whiteSpace: "nowrap" }}>
+                            ✈ {t.countryCode}
+                          </span>
+                        )}
+                      </td>
                       <td style={sx.td}>
                         <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
                           <span style={{ width: 8, height: 8, borderRadius: 3, background: pal.dot }} />
@@ -2214,6 +2278,268 @@ function Ledger({ state, update }) {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   BANK STATEMENT IMPORT PANEL
+   Reads CSVs in-browser (nothing uploaded). Raw file text is parsed and
+   discarded immediately — only the scrubbed rows are held for preview.
+   Import is append-only: rows whose ID already exists are skipped, and rows
+   that look like a manual entry are left unticked for you to decide.
+   ============================================================ */
+const STATEMENTS_FOLDER_HINT = "budget-buddy-data/inputs/transactions";
+
+function BankImportPanel({ state, update, close }) {
+  const fileRef = React.useRef(null);
+  const [preview, setPreview] = useState(null);
+  const [selected, setSelected] = useState({});
+  const [envChoice, setEnvChoice] = useState({});
+  const [syncBalance, setSyncBalance] = useState(true);
+  const [msg, setMsg] = useState(null);
+
+  // Learn from how you've classified things before (manual, bank and exchange entries).
+  const history = useMemo(() => buildHistoryIndex(state.transactions, state.envelopes),
+    [state.transactions, state.envelopes]);
+  const defaultEnv = (r) => suggestEnvelope(r, state.envelopes, history).envId;
+
+  const ingest = async (files) => {
+    setMsg(null);
+    const rowsById = new Map();
+    let sync = null, skipped = 0, sensitiveRemoved = false;
+    const errors = [];
+    for (const file of files) {
+      if (!/\.csv$/i.test(file.name)) continue;
+      try {
+        const text = await file.text(); // parsed then discarded — never stored
+        const out = isTravelSpendCsv(text) ? parseTravelSpendCsv(text) : parseBankCsv(text);
+        out.rows.forEach((r) => { if (!rowsById.has(r.id)) rowsById.set(r.id, r); });
+        skipped += out.skipped;
+        sensitiveRemoved = sensitiveRemoved || out.sensitiveRemoved;
+        if (out.balance != null && out.asOf && (!sync || out.asOf > sync.asOf)) {
+          sync = { balance: out.balance, asOf: out.asOf };
+        }
+      } catch (e) {
+        errors.push(`${file.name}: ${e.message}`);
+      }
+    }
+    const rows = reconcile([...rowsById.values()], state.transactions || [])
+      .map((r) => {
+        const s = suggestEnvelope(r, state.envelopes, history);
+        return { ...r, suggestion: s, confident: s.confident };
+      })
+      .sort((a, b) => b.date.localeCompare(a.date));
+    const sel = {}, env = {};
+    rows.forEach((r) => { sel[r.id] = r.status === "new"; env[r.id] = r.suggestion.envId; });
+    setSelected(sel);
+    setEnvChoice(env);
+    setPreview({ rows, sync, skipped, sensitiveRemoved, errors, fileCount: files.length });
+  };
+
+  const pickFiles = (e) => {
+    const files = Array.from(e.target.files || []);
+    e.target.value = "";
+    if (files.length) ingest(files);
+  };
+
+  const pickFolder = async () => {
+    try {
+      const dir = await window.showDirectoryPicker({ id: "bb-statements", mode: "read" });
+      const files = [];
+      for await (const entry of dir.values()) {
+        if (entry.kind === "file" && /\.csv$/i.test(entry.name)) files.push(await entry.getFile());
+      }
+      if (!files.length) { setMsg({ ok: false, text: "No .csv files in that folder." }); return; }
+      ingest(files);
+    } catch (e) {
+      if (e && e.name !== "AbortError") setMsg({ ok: false, text: "Couldn't open that folder — try choosing files instead." });
+    }
+  };
+
+  const currentSavings = ((state.assets || []).find((a) => a.type === "savings") || {}).amount || 0;
+  const canSync = preview && preview.sync && (!state.bankSync || preview.sync.asOf >= state.bankSync.asOf);
+
+  const doImport = () => {
+    const chosen = preview.rows.filter((r) => r.status !== "imported" && selected[r.id]);
+    const txns = chosen.map((r) => {
+      const base = {
+        id: r.id, desc: r.desc, amount: r.amount,
+        envId: r.type === "inflow" ? "__inflow" : (envChoice[r.id] || defaultEnv(r)),
+        date: r.date, type: r.type,
+      };
+      return r.tag === EXCHANGE_TAG
+        ? { ...base, tag: EXCHANGE_TAG, category: r.category, country: r.country,
+            countryCode: r.countryCode, localAmount: r.localAmount, localCurrency: r.localCurrency,
+            paymentMethod: r.paymentMethod, place: r.place }
+        : { ...base, source: "bank", method: r.method, postedDate: r.postedDate };
+    });
+    const doSync = syncBalance && canSync;
+    update((s) => {
+      const ids = new Set((s.transactions || []).map((t) => t.id));
+      const fresh = txns.filter((t) => !ids.has(t.id));
+      let next = { ...s, transactions: [...fresh, ...(s.transactions || [])] };
+      if (doSync) {
+        const others = (s.assets || []).filter((a) => a.type !== "savings");
+        const bal = preview.sync.balance;
+        const assets = bal > 0
+          ? [...others, { id: "asavings", type: "savings", label: assetType("savings").label, amount: bal }]
+          : others;
+        const liquid = assets.filter((a) => assetType(a.type).liquid).reduce((a, x) => a + x.amount, 0);
+        next = {
+          ...next, assets,
+          profile: { ...s.profile, currentSavings: liquid },
+          bankSync: { balance: bal, asOf: preview.sync.asOf, source: "bank", syncedAt: todayISO() },
+        };
+      }
+      return next;
+    });
+    setMsg({ ok: true, text: `Imported ${txns.length} transaction${txns.length === 1 ? "" : "s"}`
+      + (doSync ? ` and synced savings to $${preview.sync.balance.toLocaleString()}.` : ".") });
+    setPreview(null);
+  };
+
+  const counts = preview ? {
+    new: preview.rows.filter((r) => r.status === "new").length,
+    imported: preview.rows.filter((r) => r.status === "imported").length,
+    dup: preview.rows.filter((r) => r.status === "possibleDup").length,
+    chosen: preview.rows.filter((r) => r.status !== "imported" && selected[r.id]).length,
+  } : null;
+
+  return (
+    <div style={{ ...sx.card, border: `1px solid ${C.sky}` }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+        <h4 style={{ ...sx.cardH4, margin: 0 }}>
+          <Upload size={14} color={C.skyDeep} style={{ verticalAlign: -2, marginRight: 5 }} />
+          Import CSV
+        </h4>
+        <button style={sx.miniIconBtn} onClick={close} aria-label="Close"><X size={14} color={C.inkFaint} /></button>
+      </div>
+      <div style={{ ...sx.eduStrip, marginBottom: 10 }}>
+        <ShieldCheck size={14} color={C.skyDeep} />
+        <span>Read only in this browser — nothing is uploaded. Card numbers, account numbers and
+          reference codes are stripped; only date, a cleaned description and amount are kept.
+          Bank statements and TravelSpend exports are both detected automatically.
+          Keep them in <strong>{STATEMENTS_FOLDER_HINT}</strong> (outside the repo).</span>
+      </div>
+
+      {!preview && (
+        <div style={{ display: "flex", gap: 8 }}>
+          <button style={{ ...sx.softBtn, flex: 1 }} onClick={() => fileRef.current && fileRef.current.click()}>
+            <Upload size={13} /> Choose CSV file(s)
+          </button>
+          {typeof window !== "undefined" && "showDirectoryPicker" in window && (
+            <button style={{ ...sx.softBtn, flex: 1 }} onClick={pickFolder}>
+              <FolderOpen size={13} /> Choose folder
+            </button>
+          )}
+        </div>
+      )}
+      <input ref={fileRef} type="file" accept=".csv,text/csv" multiple onChange={pickFiles} style={{ display: "none" }} />
+
+      {preview && (
+        <div>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", fontSize: 11.5, color: C.inkSoft, margin: "4px 2px 8px" }}>
+            <span><strong style={{ color: C.mintDeep }}>{counts.new}</strong> new</span>
+            <span><strong>{counts.imported}</strong> already imported (skipped)</span>
+            <span><strong style={{ color: C.butterDeep }}>{counts.dup}</strong> possible duplicate{counts.dup === 1 ? "" : "s"} (unticked)</span>
+            {preview.skipped > 0 && <span>{preview.skipped} pending / non-SGD skipped</span>}
+          </div>
+          {preview.sensitiveRemoved && (
+            <p style={{ fontSize: 11, color: C.skyDeep, margin: "0 2px 8px" }}>
+              Sensitive numbers were detected in the file and discarded — they were not stored.
+            </p>
+          )}
+          {preview.errors.map((e) => (
+            <p key={e} style={{ fontSize: 11, color: C.roseDeep, margin: "0 2px 6px" }}>{e}</p>
+          ))}
+
+          {preview.sync && (
+            <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12, color: C.ink,
+              background: C.mintBg, borderRadius: 10, padding: "8px 10px", marginBottom: 10,
+              opacity: canSync ? 1 : 0.6 }}>
+              <input type="checkbox" checked={syncBalance && canSync} disabled={!canSync}
+                onChange={(e) => setSyncBalance(e.target.checked)} style={{ marginTop: 2 }} />
+              <span>
+                Sync savings account to available balance <strong>${preview.sync.balance.toLocaleString(undefined, { minimumFractionDigits: 2 })}</strong>
+                {" "}as at {fmtDate(preview.sync.asOf)} (currently ${Math.round(currentSavings).toLocaleString()} base)
+                {!canSync && <> — skipped, you already have a newer balance from {fmtDate(state.bankSync.asOf)}</>}
+              </span>
+            </label>
+          )}
+
+          <div style={{ maxHeight: 360, overflow: "auto", border: `1px solid ${C.line}`, borderRadius: 10 }}>
+            <table style={sx.table}>
+              <thead>
+                <tr>
+                  <th style={sx.th}></th>
+                  <th style={sx.th}>Date</th>
+                  <th style={sx.th}>Description</th>
+                  <th style={sx.th}>Envelope</th>
+                  <th style={{ ...sx.th, textAlign: "right" }}>Amount</th>
+                </tr>
+              </thead>
+              <tbody>
+                {preview.rows.map((r) => {
+                  const done = r.status === "imported";
+                  const isIn = r.type === "inflow";
+                  return (
+                    <tr key={r.id} style={{ opacity: done ? 0.45 : 1,
+                      background: r.status === "possibleDup" ? C.butterBg : "transparent" }}>
+                      <td style={sx.td}>
+                        <input type="checkbox" disabled={done} checked={!done && !!selected[r.id]}
+                          onChange={(e) => setSelected({ ...selected, [r.id]: e.target.checked })} />
+                      </td>
+                      <td style={{ ...sx.td, whiteSpace: "nowrap" }}>{fmtDate(r.date)}</td>
+                      <td style={{ ...sx.td, color: C.ink, fontWeight: 600 }}>
+                        {r.desc}
+                        <div style={{ fontSize: 10, color: C.inkFaint, fontWeight: 500 }}>
+                          {r.method}
+                          {done && " · already in ledger"}
+                          {r.status === "possibleDup" && ` · matches “${r.dupOf.desc}” on ${fmtDate(r.dupOf.date)}`}
+                          {!isIn && !done && r.suggestion && ` · ${r.suggestion.reason}`}
+                        </div>
+                      </td>
+                      <td style={sx.td}>
+                        {isIn ? (
+                          <span style={{ fontSize: 11, color: C.mintDeep, fontWeight: 700 }}>Inflow</span>
+                        ) : (
+                          <select style={{ ...sx.miniInput, width: 110, textAlign: "left",
+                            borderColor: r.confident ? undefined : C.butter }}
+                            disabled={done} value={envChoice[r.id] || ""}
+                            onChange={(e) => setEnvChoice({ ...envChoice, [r.id]: e.target.value })}>
+                            {state.envelopes.map((ev) => <option key={ev.id} value={ev.id}>{ev.name}</option>)}
+                          </select>
+                        )}
+                      </td>
+                      <td style={{ ...sx.td, textAlign: "right", fontWeight: 700, whiteSpace: "nowrap",
+                        color: isIn ? C.mintDeep : C.ink }}>
+                        {isIn ? "+" : "-"}${r.amount.toFixed(2)}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+            <button style={sx.ghostBtn} onClick={() => setPreview(null)}>Back</button>
+            <button style={{ ...sx.primaryBtn, flex: 1,
+              opacity: counts.chosen || (syncBalance && canSync) ? 1 : 0.5 }}
+              disabled={!counts.chosen && !(syncBalance && canSync)} onClick={doImport}>
+              <Plus size={14} /> Import {counts.chosen} transaction{counts.chosen === 1 ? "" : "s"}
+              {syncBalance && canSync ? " + sync balance" : ""}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {msg && (
+        <p style={{ fontSize: 11.5, margin: "8px 0 0", fontWeight: 600, color: msg.ok ? C.mintDeep : C.roseDeep }}>
+          {msg.text}
+        </p>
+      )}
     </div>
   );
 }

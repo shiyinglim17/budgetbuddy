@@ -4,3 +4,18 @@ dist
 .env.local
 .DS_Store
 *.log
+
+# Personal financial data — inputs and exports must never be committed
+*.csv
+*.tsv
+*.xls
+*.xlsx
+*.ofx
+*.qif
+*.qfx
+budgetbuddy-backup*.json
+src/data/
+data/
+inputs/
+exports/
+budget-buddy-data/
